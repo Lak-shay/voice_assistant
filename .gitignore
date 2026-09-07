@@ -1,0 +1,27 @@
+# Environment variables & secrets (dev & prod keys)
+.env
+.env.*
+
+# Python bytecode & cache
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Virtual environments
+.venv/
+venv/
+env/
+ENV/
+
+# Testing & Coverage
+.pytest_cache/
+.coverage
+
+# Logs & temp files
+*.log
+temp/
+
+# IDEs & System files
+.vscode/
+.idea/
+.DS_Store

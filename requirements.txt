@@ -1,0 +1,18 @@
+# Core Agent Runtime
+livekit-agents~=1.8.0
+
+# LiveKit Provider Plugins
+livekit-plugins-deepgram~=1.4.0
+livekit-plugins-cartesia~=1.4.0
+livekit-plugins-openai~=1.4.0
+livekit-plugins-silero~=1.4.0
+
+# Observability & Tracing
+langfuse~=2.50.0
+
+# Configuration & Environment
+pydantic-settings~=2.5.0
+python-dotenv~=1.0.0
+
+# Async Networking
+aiohttp~=3.10.0
