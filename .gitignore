@@ -1,6 +1,7 @@
 # Environment variables & secrets (dev & prod keys)
 .env
 .env.*
+!.env.example
 
 # Python bytecode & cache
 __pycache__/
