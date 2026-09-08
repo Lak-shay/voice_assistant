@@ -19,7 +19,8 @@
 - **Log Correlation:** Every standard library or `structlog` output line MUST prefix the root identifier (`[%(trace_id)s]`) so concurrent calls can be filtered independently in stdout.
 
 ## 4. Real-Time Logging & Diagnostic Rules
-- **Non-Blocking Output:** All logging must write exclusively to `sys.stdout`. NEVER attach synchronous file-writing handlers (`FileHandler`) that trigger blocking disk I/O inside the WebRTC event loop.
+- **Decoupled Queue-Backed Output:** All application logging MUST use `logging.handlers.QueueHandler` on the main thread pushing to an in-memory queue, paired with a background `logging.handlers.QueueListener` worker thread dispatching to `sys.stdout`. Direct synchronous stream writes (`StreamHandler(sys.stdout)`) and file-writing handlers (`FileHandler`) on the event loop thread are strictly prohibited because they acquire thread locks and execute synchronous I/O.
+- **Centralized Logger Architecture:** All pipeline modules, tools, and startup scripts MUST import the shared non-blocking logger from `logger.py` (`get_logger`) rather than attaching ad-hoc handlers.
 - **Structured Fields:** Include `trace_id`, `room_sid`, and `participant_id` in log records where available.
 - **Log Level Discipline:**
   - `DEBUG`: Raw audio frame events, VAD silence thresholds, and interim partial transcripts.
@@ -37,3 +38,16 @@
 - Inherit from `livekit.agents.llm.FunctionContext` and decorate methods with `@llm.ai_callable()`.
 - Annotate all tool arguments using `typing.Annotated` with explicit parameter descriptions so the LLM infers correct types.
 - Tools must catch exceptions internally and return plain-English error strings rather than throwing unhandled exceptions that crash the WebRTC worker.
+
+## 7. Configuration & Environment Invariants (Zero-Redeploy Policy)
+- **Externalize Configurable Parameters:** Any setting, timeout, threshold, buffer size, or external endpoint that could require adjustment without code changes MUST be externalized into environment variables and loaded via `config.py` (`pydantic-settings`).
+- **Never Hardcode Operational Constants:** Hardcoding operational timeouts or thresholds directly in source code is strictly prohibited.
+- **Environment Template Parity:** Whenever a configurable field is added or updated in `config.py`, it MUST simultaneously be mirrored across all environment templates: `.env.example`, `.env.dev`, and `.env.prod`.
+- **Safe Defaults in Code:** Code models (`BaseSettings`) may provide sensible fallback defaults, but operational values must remain fully overridable via environment variables.
+
+<!-- antislop:start -->
+## antislop
+For UI, copy, people, mobile layout, or code comments work, load the antislop skill for the task:
+- Core filter, always on: `antislop`
+Before starting, ask the user when antislop applies: during the work, or after it is done.
+<!-- antislop:end -->
