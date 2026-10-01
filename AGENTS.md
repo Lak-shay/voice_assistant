@@ -2,12 +2,12 @@
 
 ## 1. Development Environment & Agent Workflow
 - **LiveKit Agent Skill Standard:** Adhere strictly to the installed `livekit-agents` skills standard (`.agents/skills/` or `SKILL.md`). Follow architectural constraints: task handoffs, small conversational contexts, and synthetic test verification.
-- **Zero Hallucinations (MCP Mandatory):** Do not guess or recall SDK methods, plugin parameters, or class signatures from memory. Always query the active `livekit-docs` and `langfuse-docs` MCP servers before writing or modifying pipeline scripts.
-- **Test-Driven Verification:** Write and run asynchronous mock unit tests (`pytest tests/`) against all calendar and business tools before launching worker processes (`python agent.py dev`).
+- **Zero Hallucinations (MCP Mandatory):** Do not guess or recall SDK methods, plugin parameters, or class signatures from memory. Always query the active `livekit-docs`, `langfuse-docs`, and `telnyx-docs` MCP servers (or fetch `https://developers.telnyx.com/llms.txt`) before writing or modifying pipeline scripts.
+- **Test-Driven Verification:** Write and run asynchronous mock unit tests (`pytest tests/`) against all calendar, messaging, and business tools before launching worker processes (`python agent.py dev`).
 
 ## 2. Concurrency & Event Loop Integrity (Zero Blocking)
 - The main `asyncio` event loop directly manages real-time WebRTC audio streams.
-- NEVER execute blocking synchronous calls (`time.sleep()`, synchronous `requests`, `urllib`, or synchronous DB clients).
+- NEVER execute blocking synchronous calls (`time.sleep()`, synchronous `requests`, `urllib`, blocking `telnyx` SDK calls, or synchronous DB clients).
 - Wrap all synchronous I/O or legacy blocking APIs inside `asyncio.to_thread(...)`.
 - Prefer streaming async primitives over bulk in-memory batch collections.
 
@@ -39,11 +39,22 @@
 - Annotate all tool arguments using `typing.Annotated` with explicit parameter descriptions so the LLM infers correct types.
 - Tools must catch exceptions internally and return plain-English error strings rather than throwing unhandled exceptions that crash the WebRTC worker.
 
-## 7. Configuration & Environment Invariants (Zero-Redeploy Policy)
-- **Externalize Configurable Parameters:** Any setting, timeout, threshold, buffer size, or external endpoint that could require adjustment without code changes MUST be externalized into environment variables and loaded via `config.py` (`pydantic-settings`).
+## 7. Telephony & Messaging Directives (Telnyx / SIP / SMS)
+- **Official Docs Verification:** Consult `telnyx-docs` or check `https://developers.telnyx.com/llms.txt` prior to generating endpoints, SIP trunk options, or outbound SMS payloads. Never invent REST parameter keys.
+- **Async REST Dispatch:** All Telnyx operations (e.g., dispatching post-call confirmation texts via `/v2/messages`) must use asynchronous clients (`aiohttp.ClientSession`) or run via `asyncio.to_thread(...)` to ensure the audio loop is never stalled.
+- **E.164 Number Sanitization:** All phone numbers must be formatted to standard E.164 (`+1XXXXXXXXXX`) before making external API requests to Telnyx.
+- **Failover SIP Routing:** Telnyx SIP trunks routing calls to LiveKit must define a fallback PSTN transfer URI to route to front-desk staff in the event of an SFU or worker timeout.
+
+## 8. Configuration & Environment Invariants (Zero-Redeploy Policy)
+- **Externalize Configurable Parameters:** Any setting, timeout, threshold, buffer size, or external endpoint (including Telnyx API keys and carrier numbers) MUST be externalized into environment variables and loaded via `config.py` (`pydantic-settings`).
 - **Never Hardcode Operational Constants:** Hardcoding operational timeouts or thresholds directly in source code is strictly prohibited.
 - **Environment Template Parity:** Whenever a configurable field is added or updated in `config.py`, it MUST simultaneously be mirrored across all environment templates: `.env.example`, `.env.dev`, and `.env.prod`.
 - **Safe Defaults in Code:** Code models (`BaseSettings`) may provide sensible fallback defaults, but operational values must remain fully overridable via environment variables.
+
+## 9. Code Commenting Discipline (Minimal & Essential Only)
+- Comments MUST only be placed where strictly essential (e.g., explaining non-obvious algorithms, asynchronous concurrency pitfalls, or third-party protocol quirks).
+- NEVER add redundant, conversational, or self-evident comments (e.g., `# import modules`, `# define function`, `# return result`).
+- Function signatures and clean type annotations should be self-documenting. Keep docstrings concise and focused on parameter contracts and exception behaviors.
 
 <!-- antislop:start -->
 ## antislop

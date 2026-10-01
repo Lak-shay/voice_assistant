@@ -4,6 +4,8 @@ from config import Settings
 from startup import (
     check_langfuse_connection,
     check_livekit_connection,
+    check_model_configuration,
+    check_telnyx_connection,
     run_startup_checks,
 )
 
@@ -18,27 +20,40 @@ def mock_settings():
         LANGFUSE_PUBLIC_KEY="pk-lf-test",
         LANGFUSE_SECRET_KEY="sk-lf-test",
         LANGFUSE_BASE_URL="https://jp.cloud.langfuse.com",
+        TELNYX_API_KEY="test_telnyx_key",
+        TELNYX_PHONE_NUMBER="+15550001111",
+        CLINIC_FAILOVER_PHONE="+15551234567",
+        SIP_TRUNK_ID="trunk_123",
+        STT_PROVIDER="deepgram",
+        STT_MODEL="nova-3",
+        LLM_PROVIDER="openai",
+        LLM_MODEL="gpt-4o-mini",
+        TTS_PROVIDER="cartesia",
+        TTS_MODEL="sonic-3",
+        TTS_VOICE_ID="9626c31c-bec5-4cca-baa8-f8ba9e84c8bc",
+        VAD_MIN_SPEECH_DURATION=0.05,
+        VAD_MIN_SILENCE_DURATION=0.40,
+        CLINIC_NAME="Dr. Smith's Clinic",
+        CLINIC_TIMEZONE="America/New_York",
+        APPOINTMENT_DEFAULT_DURATION_MINUTES=30,
+        CALENDAR_BACKEND="mock",
+        CALENDAR_API_KEY="",
+        CALENDAR_ID="",
+        SMS_BACKEND="mock",
         STARTUP_CHECK_TIMEOUT=2.0,
     )
 
 
 @pytest.mark.asyncio
-async def test_check_livekit_missing_credentials():
-    """LiveKit check should fail immediately if credentials are missing."""
-    empty_settings = Settings(
-        APP_ENV="test",
-        LIVEKIT_URL="",
-        LIVEKIT_API_KEY="",
-        LIVEKIT_API_SECRET="",
-    )
-    ok, msg = await check_livekit_connection(empty_settings)
+async def test_check_livekit_missing_credentials(mock_settings):
+    mock_settings.LIVEKIT_URL = ""
+    ok, msg = await check_livekit_connection(mock_settings)
     assert not ok
     assert "Missing" in msg
 
 
 @pytest.mark.asyncio
 async def test_check_livekit_success(mock_settings):
-    """LiveKit check succeeds when list_rooms returns rooms."""
     mock_api = MagicMock()
     mock_api.__aenter__ = AsyncMock(return_value=mock_api)
     mock_api.__aexit__ = AsyncMock(return_value=None)
@@ -55,7 +70,6 @@ async def test_check_livekit_success(mock_settings):
 
 @pytest.mark.asyncio
 async def test_check_livekit_exception(mock_settings):
-    """LiveKit check captures exceptions gracefully."""
     with patch("startup.LiveKitAPI", side_effect=RuntimeError("Network unreachable")):
         ok, msg = await check_livekit_connection(mock_settings)
         assert not ok
@@ -63,17 +77,15 @@ async def test_check_livekit_exception(mock_settings):
 
 
 @pytest.mark.asyncio
-async def test_check_langfuse_missing_credentials():
-    """Langfuse check should fail immediately if credentials are missing."""
-    settings = Settings(LANGFUSE_PUBLIC_KEY="", LANGFUSE_SECRET_KEY="")
-    ok, msg = await check_langfuse_connection(settings)
+async def test_check_langfuse_missing_credentials(mock_settings):
+    mock_settings.LANGFUSE_PUBLIC_KEY = ""
+    ok, msg = await check_langfuse_connection(mock_settings)
     assert not ok
     assert "Missing" in msg
 
 
 @pytest.mark.asyncio
 async def test_check_langfuse_success(mock_settings):
-    """Langfuse check succeeds when auth_check passes."""
     with patch("startup._sync_langfuse_check", return_value=True):
         ok, msg = await check_langfuse_connection(mock_settings)
         assert ok
@@ -83,7 +95,6 @@ async def test_check_langfuse_success(mock_settings):
 
 @pytest.mark.asyncio
 async def test_check_langfuse_failure(mock_settings):
-    """Langfuse check fails when auth_check fails."""
     with patch("startup._sync_langfuse_check", return_value=False):
         ok, msg = await check_langfuse_connection(mock_settings)
         assert not ok
@@ -91,10 +102,28 @@ async def test_check_langfuse_failure(mock_settings):
 
 
 @pytest.mark.asyncio
+async def test_check_model_configuration_missing(mock_settings):
+    mock_settings.STT_MODEL = ""
+    mock_settings.LLM_PROVIDER = ""
+    ok, msg = await check_model_configuration(mock_settings)
+    assert not ok
+    assert "Missing required model configurations" in msg
+
+
+@pytest.mark.asyncio
+async def test_check_model_configuration_success(mock_settings):
+    ok, msg = await check_model_configuration(mock_settings)
+    assert ok
+    assert "STT: deepgram/nova-3" in msg
+    assert "LLM: openai/gpt-4o-mini" in msg
+    assert "TTS: cartesia/sonic-3" in msg
+
+
+@pytest.mark.asyncio
 async def test_run_startup_checks_all_healthy(mock_settings):
-    """Full startup checks pipeline passes when all services are healthy."""
     with patch("startup.check_livekit_connection", return_value=(True, "Connected")), \
-         patch("startup.check_langfuse_connection", return_value=(True, "Connected")):
+         patch("startup.check_langfuse_connection", return_value=(True, "Connected")), \
+         patch("startup.check_model_configuration", return_value=(True, "Models valid")):
 
         result = await run_startup_checks(mock_settings)
         assert result is True
@@ -102,9 +131,9 @@ async def test_run_startup_checks_all_healthy(mock_settings):
 
 @pytest.mark.asyncio
 async def test_run_startup_checks_livekit_failure(mock_settings):
-    """Full startup checks pipeline fails if LiveKit is down."""
     with patch("startup.check_livekit_connection", return_value=(False, "Connection refused")), \
-         patch("startup.check_langfuse_connection", return_value=(True, "Connected")):
+         patch("startup.check_langfuse_connection", return_value=(True, "Connected")), \
+         patch("startup.check_model_configuration", return_value=(True, "Models valid")):
 
         result = await run_startup_checks(mock_settings)
         assert result is False
@@ -112,9 +141,48 @@ async def test_run_startup_checks_livekit_failure(mock_settings):
 
 @pytest.mark.asyncio
 async def test_run_startup_checks_langfuse_failure(mock_settings):
-    """Full startup checks pipeline fails if Langfuse is down."""
     with patch("startup.check_livekit_connection", return_value=(True, "Connected")), \
-         patch("startup.check_langfuse_connection", return_value=(False, "Langfuse authentication failed")):
+         patch("startup.check_langfuse_connection", return_value=(False, "Langfuse authentication failed")), \
+         patch("startup.check_model_configuration", return_value=(True, "Models valid")):
 
         result = await run_startup_checks(mock_settings)
         assert result is False
+
+
+@pytest.mark.asyncio
+async def test_run_startup_checks_model_failure(mock_settings):
+    with patch("startup.check_livekit_connection", return_value=(True, "Connected")), \
+         patch("startup.check_langfuse_connection", return_value=(True, "Connected")), \
+         patch("startup.check_model_configuration", return_value=(False, "Invalid model configuration")):
+
+        result = await run_startup_checks(mock_settings)
+        assert result is False
+
+
+@pytest.mark.asyncio
+async def test_check_telnyx_skipped_in_mock_mode(mock_settings):
+    mock_settings.SMS_BACKEND = "mock"
+    ok, msg = await check_telnyx_connection(mock_settings)
+    assert ok is True
+    assert "skipped" in msg.lower()
+
+
+@pytest.mark.asyncio
+async def test_check_telnyx_missing_api_key(mock_settings):
+    mock_settings.SMS_BACKEND = "telnyx"
+    mock_settings.TELNYX_API_KEY = ""
+    ok, msg = await check_telnyx_connection(mock_settings)
+    assert ok is False
+    assert "Missing TELNYX_API_KEY" in msg
+
+
+@pytest.mark.asyncio
+async def test_run_startup_checks_telnyx_failure(mock_settings):
+    with patch("startup.check_livekit_connection", return_value=(True, "Connected")), \
+         patch("startup.check_langfuse_connection", return_value=(True, "Connected")), \
+         patch("startup.check_model_configuration", return_value=(True, "Models valid")), \
+         patch("startup.check_telnyx_connection", return_value=(False, "Telnyx authentication failed")):
+
+        result = await run_startup_checks(mock_settings)
+        assert result is False
+

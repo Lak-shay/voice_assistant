@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import asyncio
 import sys
 from typing import Dict, Optional, Tuple
@@ -12,7 +14,6 @@ from logger import startup_logger as logger
 async def check_livekit_connection(
     settings: Settings,
 ) -> Tuple[bool, str]:
-    
     if not settings.LIVEKIT_URL or not settings.LIVEKIT_API_KEY or not settings.LIVEKIT_API_SECRET:
         return False, "Missing LIVEKIT_URL, LIVEKIT_API_KEY, or LIVEKIT_API_SECRET"
 
@@ -31,7 +32,6 @@ async def check_livekit_connection(
 
 
 def _sync_langfuse_check(public_key: str, secret_key: str, host: str) -> bool:
-    """Synchronous Langfuse auth check executed in a background worker thread."""
     from langfuse import Langfuse
     try:
         client = Langfuse(public_key=public_key, secret_key=secret_key, host=host)
@@ -43,7 +43,6 @@ def _sync_langfuse_check(public_key: str, secret_key: str, host: str) -> bool:
 async def check_langfuse_connection(
     settings: Settings,
 ) -> Tuple[bool, str]:
-
     if not settings.LANGFUSE_PUBLIC_KEY or not settings.LANGFUSE_SECRET_KEY:
         return False, "Missing LANGFUSE_PUBLIC_KEY or LANGFUSE_SECRET_KEY"
 
@@ -67,10 +66,81 @@ async def check_langfuse_connection(
         return False, f"Langfuse connection failed: {exc}"
 
 
+async def check_model_configuration(
+    settings: Settings,
+) -> Tuple[bool, str]:
+    required = {
+        "STT_PROVIDER": settings.STT_PROVIDER,
+        "STT_MODEL": settings.STT_MODEL,
+        "LLM_PROVIDER": settings.LLM_PROVIDER,
+        "LLM_MODEL": settings.LLM_MODEL,
+        "TTS_PROVIDER": settings.TTS_PROVIDER,
+        "TTS_MODEL": settings.TTS_MODEL,
+        "TTS_VOICE_ID": settings.TTS_VOICE_ID,
+    }
+    missing = [k for k, v in required.items() if not v or not v.strip()]
+    if missing:
+        return False, f"Missing required model configurations: {', '.join(missing)}"
+
+    try:
+        from livekit.agents import inference
+        inference.STT(
+            f"{settings.STT_PROVIDER}/{settings.STT_MODEL}",
+            api_key=settings.LIVEKIT_API_KEY or "test_key",
+            api_secret=settings.LIVEKIT_API_SECRET or "test_secret",
+        )
+        inference.LLM(
+            f"{settings.LLM_PROVIDER}/{settings.LLM_MODEL}",
+            api_key=settings.LIVEKIT_API_KEY or "test_key",
+            api_secret=settings.LIVEKIT_API_SECRET or "test_secret",
+        )
+        inference.TTS(
+            f"{settings.TTS_PROVIDER}/{settings.TTS_MODEL}",
+            voice=settings.TTS_VOICE_ID,
+            api_key=settings.LIVEKIT_API_KEY or "test_key",
+            api_secret=settings.LIVEKIT_API_SECRET or "test_secret",
+        )
+        return True, (
+            f"STT: {settings.STT_PROVIDER}/{settings.STT_MODEL}, "
+            f"LLM: {settings.LLM_PROVIDER}/{settings.LLM_MODEL}, "
+            f"TTS: {settings.TTS_PROVIDER}/{settings.TTS_MODEL} ({settings.TTS_VOICE_ID})"
+        )
+    except Exception as exc:
+        return False, f"Inference model configuration invalid: {exc}"
+
+
+async def check_telnyx_connection(
+    settings: Settings,
+) -> Tuple[bool, str]:
+    if settings.SMS_BACKEND != "telnyx":
+        return True, f"Telnyx verification skipped (SMS_BACKEND={settings.SMS_BACKEND})"
+
+    if not settings.TELNYX_API_KEY:
+        return False, "Missing TELNYX_API_KEY while SMS_BACKEND is 'telnyx'"
+
+    url = "https://api.telnyx.com/v2/balance"
+    headers = {
+        "Authorization": f"Bearer {settings.TELNYX_API_KEY}",
+        "Content-Type": "application/json",
+    }
+    try:
+        timeout = aiohttp.ClientTimeout(total=settings.STARTUP_CHECK_TIMEOUT)
+        async with aiohttp.ClientSession(timeout=timeout) as session:
+            async with session.get(url, headers=headers) as resp:
+                if resp.status == 200:
+                    data = await resp.json()
+                    currency = data.get("data", {}).get("currency", "USD")
+                    balance = data.get("data", {}).get("balance", "0.00")
+                    return True, f"Connected to Telnyx API (balance: {balance} {currency})"
+                body = await resp.text()
+                return False, f"Telnyx authentication failed (HTTP {resp.status}): {body}"
+    except Exception as exc:
+        return False, f"Telnyx connection failed: {exc}"
+
+
 async def run_startup_checks(
     custom_settings: Optional[Settings] = None,
 ) -> bool:
-
     app_settings = custom_settings or default_settings
     logger.info(
         "Initiating startup API connection checks (environment: %s)",
@@ -93,7 +163,21 @@ async def run_startup_checks(
     else:
         logger.error("[FAIL] [Langfuse Telemetry]: %s", langfuse_msg)
 
-    all_ok = livekit_ok and langfuse_ok
+    model_ok, model_msg = await check_model_configuration(app_settings)
+    results["LiveKit Inference Models"] = (model_ok, model_msg)
+    if model_ok:
+        logger.info("[PASS] [LiveKit Inference Models]: %s", model_msg)
+    else:
+        logger.error("[FAIL] [LiveKit Inference Models]: %s", model_msg)
+
+    telnyx_ok, telnyx_msg = await check_telnyx_connection(app_settings)
+    results["Telnyx Telephony"] = (telnyx_ok, telnyx_msg)
+    if telnyx_ok:
+        logger.info("[PASS] [Telnyx Telephony]: %s", telnyx_msg)
+    else:
+        logger.error("[FAIL] [Telnyx Telephony]: %s", telnyx_msg)
+
+    all_ok = livekit_ok and langfuse_ok and model_ok and telnyx_ok
 
     if all_ok:
         logger.info(
@@ -107,7 +191,6 @@ async def run_startup_checks(
 
 
 def main() -> None:
-    """CLI entrypoint for standalone execution."""
     success = asyncio.run(run_startup_checks())
     sys.exit(0 if success else 1)
 
