@@ -5,9 +5,9 @@
          │
          │ (1) Inbound Call (Dial / Conditional Forward)
          ▼
- [Twilio Telephony Carrier] ──(Emergency / Crash Failover)──► [Clinic Front Desk Phone]
+ [Telnyx Telephony Carrier] ──(Emergency / Failover Forward)──► [Clinic Front Desk Phone]
          │
-         │ (2) SIP Trunk / Webhook
+         │ (2) SIP Trunk / SIP Bridge
          ▼
  [LiveKit SIP Bridge & SFU Cloud]
          │
@@ -40,7 +40,7 @@
  │   External Integrations│                    │ Observability          │
  │  ├── Google Cal / EMR  │                    │ └── Langfuse           │
  │  ├── Airtable (Hours)  │                    │     ├── Traces & Logs  │
- │  └── Twilio SMS (Conf) │                    │     ├── Token Costs    │
+ │  └── Telnyx SMS (Conf) │                    │     ├── Token Costs    │
  └────────────────────────┘                    │     └── Latency (TTFT) │
                                                └────────────────────────┘
 
@@ -52,9 +52,9 @@
 
 #### 1. Telephony & Ingress Layer
 
-* **Carrier Routing:** The clinic configures conditional call forwarding (`Busy` or `No Answer after 3 rings`) from their office line to a dedicated Twilio phone number.
-* **Carrier-Level Failover:** If the agent worker is down or the SIP handshake fails, Twilio’s fallback URL triggers a TwiML dial back to the clinic's physical front-desk line or human voicemail. No patient call is ever dropped.
-* **SIP to WebRTC Bridge:** Twilio connects to LiveKit’s SIP bridge, translating legacy PSTN telephone audio (G.711 / μ-law) into a WebRTC media stream (Opus 48kHz).
+* **Carrier Routing:** The clinic configures conditional call forwarding (`Busy` or `No Answer after 3 rings`) from their office line to a dedicated Telnyx phone number (`TELNYX_PHONE_NUMBER`).
+* **Carrier-Level Failover:** If the agent worker is unreachable or the SIP handshake fails, Telnyx failover routing immediately redirects the call to the clinic's physical front-desk line (`CLINIC_FAILOVER_PHONE`) or backup voicemail.
+* **SIP to WebRTC Bridge:** Telnyx connects to LiveKit's SIP bridge, translating legacy PSTN telephone audio (G.711 / u-law) into an Opus WebRTC media stream.
 
 #### 2. Real-Time Transport & Audio Layer (LiveKit)
 
@@ -68,23 +68,20 @@
 The worker runs inside a Docker container (or local process) executing an asynchronous loop:
 
 * **Silero VAD & Turn Detection:** Detects when the user starts and stops talking. Crucially handles **barge-in**: the millisecond the patient speaks while the assistant is talking, VAD halts Cartesia TTS playback and flushes the audio buffer.
-* **Deepgram Nova-3 (STT):** Streams incoming microphone packets over a secure WebSocket, outputting partial transcripts and finalizing punctuation within 150–250ms.
+* **Deepgram Nova-3 (STT):** Streams incoming microphone packets over a secure WebSocket, outputting partial transcripts and finalizing punctuation within 150-250ms.
 * **LLM Engine (Claude 3.5 Haiku / GPT-4o-mini):** Processes incoming user utterances. Configured to stream tokens immediately to maintain conversational momentum.
 * **Cartesia Sonic-3 (TTS):** Converts streaming tokens from the LLM into raw PCM audio chunks with sub-90ms time-to-first-audio, streaming directly back to the LiveKit room.
 
 #### 4. Tool Execution & Data Layer
 
 * **`FunctionContext` Tools:** Encapsulates business logic. Tools execute asynchronously so the main WebRTC loop is never blocked:
-* **`check_availability`:** Checks slots via Google Calendar / Cal.com API.
-* **`book_appointment`:** Inserts event into the calendar and stores contact details in PostgreSQL or Airtable.
-* **`send_confirmation_sms`:** Sends an intake link or confirmation text via Twilio REST API upon booking.
-
-
-* **Admin / Clinic Config (Airtable / Google Sheets):** Stores dynamic clinic metadata (doctor names, holiday hours, cancellation policy) so the clinic staff can modify operations without touching code.
+* **`check_availability`:** Queries open slots via Google Calendar API (`freebusy.query`), grouping openings into morning, afternoon, and evening periods.
+* **`book_appointment`:** Protected by an atomic multithreading mutex lock (`_write_lock`). Performs an on-calendar verification (`freebusy.query`) to ensure the slot was not taken, then creates the calendar event (`events().insert`) before confirming.
+* **`send_confirmation_sms`:** Dispatches post-booking confirmation SMS via Telnyx REST API (`/v2/messages`).
 
 #### 5. Observability & Telemetry (Langfuse)
 
-* **Async Ingestion:** Every session creates a Langfuse trace.
+* **Async Ingestion:** Every session creates a Langfuse trace correlated with the LiveKit room name (`trace_id`).
 * **Metrics Captured:**
 * Turn-by-turn latency (STT duration, LLM TTFT, TTS playback start).
 * Audio interruption counts (measuring how often patients cut the agent off).
@@ -95,25 +92,25 @@ The worker runs inside a Docker container (or local process) executing an asynch
 
 | Step | Action | Protocol / Tech | What Happens |
 | --- | --- | --- | --- |
-| **1. Dial** | Inbound Call | PSTN | Patient calls clinic. Clinic's carrier forwards to Twilio if busy or unanswered. |
-| **2. SIP Bridge** | Telephony Handshake | SIP / TwiML | Twilio routes the call to LiveKit SIP URI; LiveKit spins up a room. |
+| **1. Dial** | Inbound Call | PSTN | Patient calls clinic. Clinic carrier forwards to Telnyx if busy or unanswered. |
+| **2. SIP Bridge** | Telephony Handshake | SIP / Telnyx | Telnyx routes the call to LiveKit SIP URI; LiveKit spins up a room. |
 | **3. Dispatch** | Worker Joins | WebRTC | LiveKit dispatches a job; Python agent worker joins the room and subscribes to audio. |
-| **4. Greeting** | Initial Turn | Cartesia TTS | Agent initiates conversation: *"Thanks for calling Dr. Smith's clinic. How can I help you today?"* |
+| **4. Greeting** | Initial Turn | Cartesia TTS | Agent initiates conversation: *"Welcome to Dr. Smith's clinic. How can I help you?"* |
 | **5. Input Stream** | Patient Speaks | Deepgram STT | Caller's voice is processed in real time. Deepgram emits interim transcripts. |
-| **6. Turn End** | Silence Detected | Silero VAD | VAD detects 400–600ms of caller silence; marks turn as complete and sends prompt to LLM. |
+| **6. Turn End** | Silence Detected | Silero VAD | VAD detects 400-600ms of caller silence; marks turn as complete and sends prompt to LLM. |
 | **7. Tool Call** | Checking Schedule | Async HTTP / API | If patient asks for an appointment, LLM triggers `check_availability` tool, receives open slots. |
 | **8. Stream Back** | Speech Generation | Claude + Cartesia | LLM generates phonetically formatted response; Cartesia streams audio back through the phone. |
-| **9. Interruption** | Caller Cuts In | Barge-In Event | If caller says *"Wait, no,"* Silero catches speech, immediately silences TTS output, and resets LLM context. |
-| **10. Wrap-up** | Call Termination | Twilio REST + Langfuse | Call disconnects. Worker triggers post-call SMS confirmation and pushes trace metrics to Langfuse. |
+| **9. Interruption** | Caller Cuts In | Barge-In Event | If caller cuts in, Silero catches speech, immediately silences TTS output, and resets LLM context. |
+| **10. Wrap-up** | Call Termination | Telnyx REST + Langfuse | Call disconnects. Worker triggers post-call SMS confirmation and pushes trace metrics to Langfuse. |
 
-### Latency Budget (Target: Sub-800ms)
+### Conversational Latency Budget (Target: Sub-1 Second Turnaround, ~800ms Average)
 
-To sound conversational and natural, end-to-end conversational turnaround must remain under **800ms**:
+To maintain natural conversational rhythm on telephony networks, end-to-end response turnaround targets an average of ~800ms, staying strictly under a 1-second budget:
 
-| Component                   | Target Latency      | Optimization Technique                                                                |
-| --------------------------- | ------------------- | ------------------------------------------------------------------------------------- |
-| **VAD / Turn Silence**      | ~350ms – 450ms      | Tuned silence threshold (prevents cutting off callers mid-breath).                    |
-| **STT Finalization**        | ~150ms – 200ms      | Deepgram streaming WebSocket with interim results.                                    |
-| **LLM Time-to-First-Token** | ~200ms – 300ms      | Lightweight models (Claude 3.5 Haiku / GPT-4o-mini) with concise system instructions. |
-| **TTS First Audio Chunk**   | ~80ms – 120ms       | Cartesia Sonic streaming chunk generation over WebSocket.                             |
-| **Total Round-Trip Time**   | **~780ms – 1070ms** | Well within acceptable human conversational rhythm on telephone lines.                |
+| Component | Target Latency | Optimization Technique |
+| --- | --- | --- |
+| **VAD / Turn Silence** | ~350ms - 450ms | Tuned silence threshold (prevents cutting off callers mid-breath). |
+| **STT Finalization** | ~150ms - 200ms | Deepgram streaming WebSocket with interim results. |
+| **LLM Time-to-First-Token** | ~200ms - 300ms | Lightweight models (Claude 3.5 Haiku / GPT-4o-mini) with concise system instructions. |
+| **TTS First Audio Chunk** | ~80ms - 120ms | Cartesia Sonic streaming chunk generation over WebSocket. |
+| **Total Round-Trip Time** | **~780ms - 1070ms** | Typical turnaround (~800ms) matches natural human telephone conversational rhythm. |

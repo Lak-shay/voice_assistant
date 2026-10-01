@@ -7,13 +7,25 @@ from agent import ClinicReceptionistAgent, entrypoint
 def test_clinic_agent_instructions_constraints():
     agent = ClinicReceptionistAgent()
     instructions = agent.instructions
-
-    # Must mandate short conversational turns
     assert "1 to 2 short conversational sentences" in instructions
-    # Must explicitly prohibit markdown characters
     assert "Never output markdown characters" in instructions
-    # Must mandate phonetic representation
     assert "phonetically" in instructions
+    assert "timezone" in instructions
+    assert "Today's date is" in instructions
+    assert "When would you like the appointment?" in instructions
+
+
+@pytest.mark.asyncio
+async def test_clinic_agent_on_enter_greeting():
+    agent = ClinicReceptionistAgent()
+    mock_session = MagicMock()
+    mock_session.generate_reply = AsyncMock()
+    agent._activity = MagicMock(session=mock_session)
+
+    await agent.on_enter()
+    mock_session.generate_reply.assert_awaited_once()
+    call_kwargs = mock_session.generate_reply.call_args.kwargs
+    assert "How can I help you?" in call_kwargs["instructions"]
 
 
 @pytest.mark.asyncio

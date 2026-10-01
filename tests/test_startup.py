@@ -2,6 +2,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 from config import Settings
 from startup import (
+    check_calendar_connection,
     check_langfuse_connection,
     check_livekit_connection,
     check_model_configuration,
@@ -16,7 +17,7 @@ def mock_settings():
         APP_ENV="test",
         LIVEKIT_URL="wss://test.livekit.cloud",
         LIVEKIT_API_KEY="test_key",
-        LIVEKIT_API_SECRET="test_secret",
+        LIVEKIT_API_SECRET="test_secret_with_minimum_32_bytes_length!",
         LANGFUSE_PUBLIC_KEY="pk-lf-test",
         LANGFUSE_SECRET_KEY="sk-lf-test",
         LANGFUSE_BASE_URL="https://jp.cloud.langfuse.com",
@@ -181,7 +182,69 @@ async def test_run_startup_checks_telnyx_failure(mock_settings):
     with patch("startup.check_livekit_connection", return_value=(True, "Connected")), \
          patch("startup.check_langfuse_connection", return_value=(True, "Connected")), \
          patch("startup.check_model_configuration", return_value=(True, "Models valid")), \
-         patch("startup.check_telnyx_connection", return_value=(False, "Telnyx authentication failed")):
+         patch("startup.check_telnyx_connection", return_value=(False, "Telnyx authentication failed")), \
+         patch("startup.check_calendar_connection", return_value=(True, "Calendar mock")):
+
+        result = await run_startup_checks(mock_settings)
+        assert result is False
+
+
+@pytest.mark.asyncio
+async def test_check_calendar_skipped_in_mock_mode(mock_settings):
+    mock_settings.CALENDAR_BACKEND = "mock"
+    ok, msg = await check_calendar_connection(mock_settings)
+    assert ok is True
+    assert "skipped" in msg.lower()
+
+
+@pytest.mark.asyncio
+async def test_check_calendar_missing_api_key_when_google(mock_settings):
+    mock_settings.CALENDAR_BACKEND = "google"
+    mock_settings.CALENDAR_API_KEY = ""
+    ok, msg = await check_calendar_connection(mock_settings)
+    assert ok is False
+    assert "Missing CALENDAR_API_KEY" in msg
+
+
+@pytest.mark.asyncio
+async def test_check_calendar_google_success(mock_settings):
+    mock_settings.CALENDAR_BACKEND = "google"
+    mock_settings.CALENDAR_API_KEY = "test_key"
+    mock_settings.CALENDAR_ID = "primary"
+
+    mock_google = MagicMock()
+    mock_fb = MagicMock()
+    mock_fb.execute.return_value = {"calendars": {"primary": {"busy": []}}}
+    mock_google.freebusy.return_value.query.return_value = mock_fb
+
+    with patch("tools.calendar_service.CalendarService._get_google_service", return_value=mock_google):
+        ok, msg = await check_calendar_connection(mock_settings)
+        assert ok is True
+        assert "Connected to Google Calendar API" in msg
+
+
+@pytest.mark.asyncio
+async def test_check_calendar_google_failure(mock_settings):
+    mock_settings.CALENDAR_BACKEND = "google"
+    mock_settings.CALENDAR_API_KEY = "test_key"
+    mock_settings.CALENDAR_ID = "primary"
+
+    mock_google = MagicMock()
+    mock_google.freebusy.return_value.query.return_value.execute.side_effect = RuntimeError("Google API network timeout")
+
+    with patch("tools.calendar_service.CalendarService._get_google_service", return_value=mock_google):
+        ok, msg = await check_calendar_connection(mock_settings)
+        assert ok is False
+        assert "failed" in msg.lower()
+
+
+@pytest.mark.asyncio
+async def test_run_startup_checks_calendar_failure(mock_settings):
+    with patch("startup.check_livekit_connection", return_value=(True, "Connected")), \
+         patch("startup.check_langfuse_connection", return_value=(True, "Connected")), \
+         patch("startup.check_model_configuration", return_value=(True, "Models valid")), \
+         patch("startup.check_telnyx_connection", return_value=(True, "Telnyx valid")), \
+         patch("startup.check_calendar_connection", return_value=(False, "Google Calendar credentials invalid")):
 
         result = await run_startup_checks(mock_settings)
         assert result is False

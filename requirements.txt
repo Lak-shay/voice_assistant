@@ -17,6 +17,11 @@ python-dotenv>=1.0.0,<2.0.0
 # Async Networking
 aiohttp>=3.11.0,<4.0.0
 
+# External Integrations (Google Calendar)
+google-api-python-client>=2.150.0,<3.0.0
+google-auth>=2.30.0,<3.0.0
+tzdata>=2025.1
+
 # Testing & Verification
 pytest>=8.0.0,<10.0.0
 pytest-asyncio>=0.24.0,<2.0.0

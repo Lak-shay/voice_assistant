@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import asyncio
+import datetime
 import sys
+from zoneinfo import ZoneInfo
 
 from livekit.agents import (
     Agent,
@@ -25,24 +27,45 @@ from tools.appointment_tools import (
 )
 
 
+def get_current_clinic_time() -> tuple[str, str]:
+    try:
+        clinic_tz = ZoneInfo(settings.CLINIC_TIMEZONE)
+    except Exception:
+        clinic_tz = datetime.timezone.utc
+    now = datetime.datetime.now(clinic_tz)
+    today_str = now.strftime("%A, %B %d, %Y")
+    time_str = now.strftime("%I:%M %p").lstrip("0")
+    return today_str, time_str
+
+
 class ClinicReceptionistAgent(Agent):
     def __init__(self) -> None:
+        today_str, time_str = get_current_clinic_time()
         instructions = (
             f"You are the friendly, professional voice receptionist for {settings.CLINIC_NAME}. "
-            "Your role is to answer questions and schedule appointments over the phone. "
+            f"Today's date is {today_str}. The current clinic time is {time_str} in timezone {settings.CLINIC_TIMEZONE}. "
+            "Use this live date and time to accurately resolve relative dates like today, tomorrow, this afternoon, or next Monday. "
             "Follow these dialogue rules strictly: "
             "1. Speak in 1 to 2 short conversational sentences per turn. "
             "2. Never output markdown characters like asterisks, hashes, bullet points, or raw web URLs. "
             "3. Say all dates, times, and phone numbers phonetically in words. "
-            "4. When a caller wants to book, check availability first to offer open slots, "
-            "then ask for their name and phone number before calling book_appointment. "
-            "5. Once booked, offer to text them the confirmation."
+            "4. Follow the appointment booking flow: "
+            "   a. When the customer provides their preferred date and time, call check_availability for that date and time. "
+            "   b. If their exact requested time is unavailable but other slots exist on that day, offer only the periods (morning, afternoon, or evening) that actually have open slots, and ask which period they prefer. Never ask for periods that have no openings. "
+            "   c. Once they choose a period, offer the specific open times in that period. "
+            "   d. If the customer rejects an offered slot (for example, saying 'No I do not want that slot'), politely reply by asking: 'When would you like the appointment?' "
+            "   e. If the customer asks 'When is it available?' or provides an updated date and time, check availability around their original requested date and times and offer the nearest options. "
+            "   f. When the customer agrees to an open slot, ask for their full name and phone number before calling book_appointment. "
+            "5. Once booked, offer to send a confirmation text message."
         )
         super().__init__(instructions=instructions)
 
     async def on_enter(self) -> None:
         await self.session.generate_reply(
-            instructions=f"Warmly greet the caller on behalf of {settings.CLINIC_NAME} in one short sentence and ask how you can help them."
+            instructions=(
+                f"Greet the caller on behalf of {settings.CLINIC_NAME} in one short sentence by saying: "
+                f"'Welcome to {settings.CLINIC_NAME}. How can I help you?'"
+            )
         )
 
 

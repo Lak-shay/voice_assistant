@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import datetime
 import sys
 from typing import Dict, Optional, Tuple
 import aiohttp
@@ -84,21 +85,22 @@ async def check_model_configuration(
 
     try:
         from livekit.agents import inference
+        fallback_secret = "test_secret_with_minimum_32_bytes_for_jwt!"
         inference.STT(
             f"{settings.STT_PROVIDER}/{settings.STT_MODEL}",
             api_key=settings.LIVEKIT_API_KEY or "test_key",
-            api_secret=settings.LIVEKIT_API_SECRET or "test_secret",
+            api_secret=settings.LIVEKIT_API_SECRET or fallback_secret,
         )
         inference.LLM(
             f"{settings.LLM_PROVIDER}/{settings.LLM_MODEL}",
             api_key=settings.LIVEKIT_API_KEY or "test_key",
-            api_secret=settings.LIVEKIT_API_SECRET or "test_secret",
+            api_secret=settings.LIVEKIT_API_SECRET or fallback_secret,
         )
         inference.TTS(
             f"{settings.TTS_PROVIDER}/{settings.TTS_MODEL}",
             voice=settings.TTS_VOICE_ID,
             api_key=settings.LIVEKIT_API_KEY or "test_key",
-            api_secret=settings.LIVEKIT_API_SECRET or "test_secret",
+            api_secret=settings.LIVEKIT_API_SECRET or fallback_secret,
         )
         return True, (
             f"STT: {settings.STT_PROVIDER}/{settings.STT_MODEL}, "
@@ -136,6 +138,35 @@ async def check_telnyx_connection(
                 return False, f"Telnyx authentication failed (HTTP {resp.status}): {body}"
     except Exception as exc:
         return False, f"Telnyx connection failed: {exc}"
+
+
+async def check_calendar_connection(
+    settings: Settings,
+) -> Tuple[bool, str]:
+    if settings.CALENDAR_BACKEND != "google":
+        return True, f"Calendar verification skipped (CALENDAR_BACKEND={settings.CALENDAR_BACKEND})"
+
+    if not settings.CALENDAR_API_KEY:
+        return False, "Missing CALENDAR_API_KEY while CALENDAR_BACKEND is 'google'"
+
+    try:
+        from tools.calendar_service import calendar_service
+        service = calendar_service._get_google_service()
+        if not service:
+            return False, "Failed to initialize Google Calendar client from configured credentials"
+        cal_id = settings.CALENDAR_ID or "primary"
+        now = datetime.datetime.now(datetime.timezone.utc)
+        body = {
+            "timeMin": now.isoformat(),
+            "timeMax": (now + datetime.timedelta(hours=1)).isoformat(),
+            "items": [{"id": cal_id}],
+        }
+        res = await asyncio.to_thread(service.freebusy().query(body=body).execute)
+        if "calendars" in res:
+            return True, f"Connected to Google Calendar API (Calendar ID: {cal_id})"
+        return False, "Google Calendar freebusy query did not return expected calendar data"
+    except Exception as exc:
+        return False, f"Google Calendar connection failed: {exc}"
 
 
 async def run_startup_checks(
@@ -177,7 +208,14 @@ async def run_startup_checks(
     else:
         logger.error("[FAIL] [Telnyx Telephony]: %s", telnyx_msg)
 
-    all_ok = livekit_ok and langfuse_ok and model_ok and telnyx_ok
+    cal_ok, cal_msg = await check_calendar_connection(app_settings)
+    results["Google Calendar"] = (cal_ok, cal_msg)
+    if cal_ok:
+        logger.info("[PASS] [Google Calendar]: %s", cal_msg)
+    else:
+        logger.error("[FAIL] [Google Calendar]: %s", cal_msg)
+
+    all_ok = livekit_ok and langfuse_ok and model_ok and telnyx_ok and cal_ok
 
     if all_ok:
         logger.info(
