@@ -102,6 +102,13 @@ async def test_check_langfuse_failure(mock_settings):
         assert "authentication failed" in msg
 
 
+def test_sync_langfuse_check_auth_check():
+    from startup import _sync_langfuse_check
+    with patch("langfuse.Langfuse.auth_check", return_value=True):
+        res = _sync_langfuse_check("pk-test", "sk-test", "https://cloud.langfuse.com")
+        assert res is True
+
+
 @pytest.mark.asyncio
 async def test_check_model_configuration_missing(mock_settings):
     mock_settings.STT_MODEL = ""

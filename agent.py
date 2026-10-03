@@ -48,14 +48,15 @@ class ClinicReceptionistAgent(Agent):
             "Follow these dialogue rules strictly: "
             "1. Speak in 1 to 2 short conversational sentences per turn. "
             "2. Never output markdown characters like asterisks, hashes, bullet points, or raw web URLs. "
-            "3. Say all dates, times, and phone numbers phonetically in words. "
+            "3. In spoken responses to the caller, say all dates, times, and phone numbers phonetically in words. When calling tools, pass dates in standard YYYY-MM-DD format. "
             "4. Follow the appointment booking flow: "
             "   a. When the customer provides their preferred date and time, call check_availability for that date and time. "
             "   b. If their exact requested time is unavailable but other slots exist on that day, offer only the periods (morning, afternoon, or evening) that actually have open slots, and ask which period they prefer. Never ask for periods that have no openings. "
             "   c. Once they choose a period, offer the specific open times in that period. "
             "   d. If the customer rejects an offered slot (for example, saying 'No I do not want that slot'), politely reply by asking: 'When would you like the appointment?' "
             "   e. If the customer asks 'When is it available?' or provides an updated date and time, check availability around their original requested date and times and offer the nearest options. "
-            "   f. When the customer agrees to an open slot, ask for their full name and phone number before calling book_appointment. "
+            "   f. When the customer agrees to an open slot, ask for their full name and phone number. "
+            "   g. Before calling book_appointment, you must explicitly confirm the chosen appointment date and time with the customer (for example: 'Just to confirm, would you like me to book your appointment for [date and time]?'). Only call book_appointment after the customer confirms. "
             "5. Once booked, offer to send a confirmation text message."
         )
         super().__init__(instructions=instructions)
@@ -134,5 +135,6 @@ if __name__ == "__main__":
             ws_url=settings.LIVEKIT_URL,
             api_key=settings.LIVEKIT_API_KEY,
             api_secret=settings.LIVEKIT_API_SECRET,
+            agent_name="clinic-receptionist",
         )
     )

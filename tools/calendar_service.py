@@ -96,7 +96,11 @@ class CalendarService:
             "items": [{"id": cal_id}],
         }
         res = service.freebusy().query(body=body).execute()
-        busy_items = res.get("calendars", {}).get(cal_id, {}).get("busy", [])
+        calendars = res.get("calendars", {})
+        cal_data = calendars.get(cal_id)
+        if not cal_data and len(calendars) == 1:
+            cal_data = next(iter(calendars.values()))
+        busy_items = cal_data.get("busy", []) if cal_data else []
 
         parsed_busy: list[tuple[datetime.datetime, datetime.datetime]] = []
         for item in busy_items:
@@ -201,7 +205,11 @@ class CalendarService:
                             "items": [{"id": cal_id}],
                         }
                     ).execute()
-                    busy_list = fb_res.get("calendars", {}).get(cal_id, {}).get("busy", [])
+                    calendars = fb_res.get("calendars", {})
+                    cal_data = calendars.get(cal_id)
+                    if not cal_data and len(calendars) == 1:
+                        cal_data = next(iter(calendars.values()))
+                    busy_list = cal_data.get("busy", []) if cal_data else []
 
                     for b in busy_list:
                         b_start = datetime.datetime.fromisoformat(b["start"])

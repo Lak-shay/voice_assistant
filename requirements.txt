@@ -8,7 +8,7 @@ livekit-plugins-openai>=1.4.0,<2.0.0
 livekit-plugins-silero>=1.4.0,<2.0.0
 
 # Observability & Tracing
-langfuse>=2.50.0,<3.0.0
+langfuse>=4.7.0,<4.16.0
 
 # Configuration & Environment
 pydantic-settings>=2.5.0,<3.0.0

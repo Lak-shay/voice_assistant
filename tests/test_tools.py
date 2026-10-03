@@ -7,8 +7,15 @@ from tools.appointment_tools import (
     format_slot_phonetically,
     send_confirmation_sms,
 )
-from tools.calendar_service import CalendarService
+from tools.calendar_service import CalendarService, calendar_service
 from tools.sms_service import SMSService
+
+
+@pytest.fixture(autouse=True)
+def isolate_test_environment(monkeypatch):
+    monkeypatch.setattr("tools.calendar_service.settings.CALENDAR_BACKEND", "mock")
+    monkeypatch.setattr("tools.appointment_tools.settings.CALENDAR_BACKEND", "mock")
+    calendar_service._in_memory_bookings.clear()
 
 
 def test_format_slot_phonetically():

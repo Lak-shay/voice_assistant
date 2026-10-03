@@ -14,8 +14,8 @@
 ## 3. Session Correlation & Tracing Architecture (Root trace_id)
 - **Root Identifier:** Every call session MUST establish a single root `trace_id` using the unique LiveKit room name (`trace_id = ctx.room.name`).
 - **Telemetry Propagation (Langfuse):**
-  - Initialize the root trace at session start via `langfuse.trace(id=trace_id, name="inbound_call", session_id=trace_id, ...)`.
-  - All subsequent turns, speech synthesis events, and tool executions must nest under this root trace using child spans/generations.
+  - Initialize the root observation at session start via Langfuse v4 (`client.start_observation(name="inbound_call", trace_context={"trace_id": trace_id_hex}, ...)`) with client-side attribute propagation (`propagate_attributes(trace_name="inbound_call", session_id=trace_id, ...)`).
+  - All subsequent turns, speech synthesis events, and tool executions must nest under this root trace using child observations/generations.
 - **Log Correlation:** Every standard library or `structlog` output line MUST prefix the root identifier (`[%(trace_id)s]`) so concurrent calls can be filtered independently in stdout.
 
 ## 4. Real-Time Logging & Diagnostic Rules

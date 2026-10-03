@@ -1,4 +1,4 @@
-from unittest.mock import MagicMock, patch
+from unittest.mock import ANY, MagicMock, patch
 import pytest
 
 from telemetry import TelemetryManager
@@ -17,28 +17,50 @@ def test_telemetry_create_session_trace():
     tm = TelemetryManager()
     mock_client = MagicMock()
     mock_trace = MagicMock()
-    mock_client.trace.return_value = mock_trace
+    mock_client.start_observation.return_value = mock_trace
 
     with patch.object(tm, "get_client", return_value=mock_client):
         trace = tm.create_session_trace("room_abc_789", participant_id="caller_456")
         assert trace is mock_trace
-        mock_client.trace.assert_called_once_with(
-            id="room_abc_789",
+        mock_client.start_observation.assert_called_once_with(
             name="inbound_call",
-            session_id="room_abc_789",
-            user_id="caller_456",
+            trace_context={"trace_id": ANY},
             metadata={
-                "environment": tm.get_client().return_value.metadata if False else "dev",
                 "room_name": "room_abc_789",
                 "clinic_name": "Dr. Smith's Clinic",
             },
         )
+        assert tm._active_traces.get("room_abc_789") is mock_trace
+
+
+def test_telemetry_start_and_end_span():
+    tm = TelemetryManager()
+    mock_trace = MagicMock()
+    mock_span = MagicMock()
+    mock_trace.start_observation.return_value = mock_span
+    tm._active_traces["room_abc_789"] = mock_trace
+
+    span = tm.start_span("room_abc_789", "transcription", input_data={"audio_bytes": 1024})
+    assert span is mock_span
+    mock_trace.start_observation.assert_called_once_with(
+        name="transcription",
+        input={"audio_bytes": 1024},
+    )
+
+    tm.end_span(span, output_data={"text": "hello doctor"})
+    mock_span.update.assert_called_once_with(output={"text": "hello doctor"})
+    mock_span.end.assert_called_once()
 
 
 @pytest.mark.asyncio
 async def test_telemetry_flush_non_blocking():
     tm = TelemetryManager()
     mock_client = MagicMock()
+    mock_trace = MagicMock()
+    tm._active_traces["room_abc_789"] = mock_trace
+
     with patch.object(tm, "get_client", return_value=mock_client):
         await tm.flush("room_abc_789")
+        mock_trace.end.assert_called_once()
         mock_client.flush.assert_called_once()
+        assert "room_abc_789" not in tm._active_traces

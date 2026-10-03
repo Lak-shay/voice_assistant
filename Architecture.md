@@ -79,14 +79,15 @@ The worker runs inside a Docker container (or local process) executing an asynch
 * **`book_appointment`:** Protected by an atomic multithreading mutex lock (`_write_lock`). Performs an on-calendar verification (`freebusy.query`) to ensure the slot was not taken, then creates the calendar event (`events().insert`) before confirming.
 * **`send_confirmation_sms`:** Dispatches post-booking confirmation SMS via Telnyx REST API (`/v2/messages`).
 
-#### 5. Observability & Telemetry (Langfuse)
+#### 5. Observability & Telemetry (Langfuse v4)
 
-* **Async Ingestion:** Every session creates a Langfuse trace correlated with the LiveKit room name (`trace_id`).
+* **Observations-First Data Model:** Every call session establishes a root observation in Langfuse v4 correlated with the LiveKit room name (`trace_id`), propagating session ID and context via `propagate_attributes`.
+* **OTLP Direct Ingestion:** OpenTelemetry spans are exported with header `x-langfuse-ingestion-version: 4` to `/api/public/otel/v1/traces`, avoiding legacy dual-write delay and mapping directly to the v4 events model.
 * **Metrics Captured:**
-* Turn-by-turn latency (STT duration, LLM TTFT, TTS playback start).
-* Audio interruption counts (measuring how often patients cut the agent off).
-* Tool execution status (success/failure rates of booking APIs).
-* Token usage and associated cost estimation per call.
+  * Turn-by-turn latency (STT duration, LLM TTFT, TTS playback start).
+  * Audio interruption counts (measuring how often patients cut the agent off).
+  * Tool execution status (success/failure rates of booking APIs).
+  * Token usage and associated cost estimation per call.
 
 ### Step-by-Step Call Lifecycle
 

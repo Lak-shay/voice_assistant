@@ -13,6 +13,8 @@ def test_clinic_agent_instructions_constraints():
     assert "timezone" in instructions
     assert "Today's date is" in instructions
     assert "When would you like the appointment?" in instructions
+    assert "confirm" in instructions.lower()
+    assert "Before calling book_appointment" in instructions
 
 
 @pytest.mark.asyncio
