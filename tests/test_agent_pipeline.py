@@ -15,6 +15,16 @@ def test_clinic_agent_instructions_constraints():
     assert "When would you like the appointment?" in instructions
     assert "confirm" in instructions.lower()
     assert "Before calling book_appointment" in instructions
+    assert "No phone number was received from caller ID" in instructions
+    assert "confirm the chosen appointment date, time, and phone number" in instructions
+
+
+def test_clinic_agent_instructions_with_caller_phone():
+    agent = ClinicReceptionistAgent(caller_phone="+18453768795")
+    instructions = agent.instructions
+    assert "+18453768795" in instructions
+    assert "confirm only the chosen appointment date and time" in instructions
+
 
 
 @pytest.mark.asyncio

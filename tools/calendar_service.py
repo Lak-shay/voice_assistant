@@ -4,9 +4,11 @@ import asyncio
 import datetime
 import json
 import os
+import re
 import threading
 from typing import Any
 from zoneinfo import ZoneInfo
+from dateutil import parser
 
 from config import settings
 from logger import logger
@@ -18,6 +20,74 @@ try:
     GOOGLE_CLIENT_AVAILABLE = True
 except ImportError:
     GOOGLE_CLIENT_AVAILABLE = False
+
+
+def parse_flexible_date(date_str: str, clinic_tz: datetime.tzinfo) -> datetime.date | None:
+    """Robustly parse natural language, relative, or formatted date strings into a date object."""
+    if not date_str:
+        return None
+    raw = date_str.strip().lower()
+    base_date = datetime.datetime.now(clinic_tz).date()
+
+    if raw in ("today", "now"):
+        return base_date
+    if raw == "tomorrow":
+        return base_date + datetime.timedelta(days=1)
+    if raw == "yesterday":
+        return base_date - datetime.timedelta(days=1)
+
+    weekdays = {
+        "monday": 0, "tuesday": 1, "wednesday": 2, "thursday": 3,
+        "friday": 4, "saturday": 5, "sunday": 6,
+    }
+    for day_name, day_num in weekdays.items():
+        if day_name in raw:
+            days_ahead = (day_num - base_date.weekday()) % 7
+            if days_ahead == 0:
+                days_ahead = 7
+            return base_date + datetime.timedelta(days=days_ahead)
+
+    try:
+        parsed = parser.parse(date_str, default=datetime.datetime.combine(base_date, datetime.time(0, 0)))
+        return parsed.date()
+    except (ValueError, OverflowError, parser.ParserError):
+        return None
+
+
+def parse_flexible_slot(
+    slot_str: str,
+    clinic_tz: datetime.tzinfo,
+    default_date: datetime.date | None = None,
+) -> datetime.datetime | None:
+    """Robustly parse natural language, relative, or formatted appointment slot strings."""
+    if not slot_str:
+        return None
+    raw = slot_str.strip()
+
+    # Reject date-only strings without any time specification
+    if not re.search(r"(\d{1,2}:\d{2}|\b\d{1,2}\s*(?:am|pm)\b)", raw, re.I):
+        return None
+
+    if default_date is None:
+        default_date = datetime.datetime.now(clinic_tz).date()
+
+    # If slot string specifies a relative day (e.g. 'tomorrow at 10 AM', 'Monday at 2 PM')
+    rel_match = re.search(r"\b(today|tomorrow|yesterday|monday|tuesday|wednesday|thursday|friday|saturday|sunday)\b", raw, re.I)
+    if rel_match:
+        rel_date = parse_flexible_date(rel_match.group(1), clinic_tz)
+        if rel_date:
+            default_date = rel_date
+
+    default_dt = datetime.datetime.combine(default_date, datetime.time(0, 0))
+    try:
+        parsed = parser.parse(raw, default=default_dt, fuzzy=True)
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=clinic_tz)
+        else:
+            parsed = parsed.astimezone(clinic_tz)
+        return parsed.replace(second=0, microsecond=0)
+    except (ValueError, OverflowError, parser.ParserError):
+        return None
 
 
 class CalendarService:
@@ -95,40 +165,52 @@ class CalendarService:
             "timeZone": settings.CLINIC_TIMEZONE,
             "items": [{"id": cal_id}],
         }
-        res = service.freebusy().query(body=body).execute()
-        calendars = res.get("calendars", {})
-        cal_data = calendars.get(cal_id)
-        if not cal_data and len(calendars) == 1:
-            cal_data = next(iter(calendars.values()))
-        busy_items = cal_data.get("busy", []) if cal_data else []
-
-        parsed_busy: list[tuple[datetime.datetime, datetime.datetime]] = []
-        for item in busy_items:
-            start_str = item.get("start")
-            end_str = item.get("end")
-            if start_str and end_str:
-                parsed_busy.append((
-                    datetime.datetime.fromisoformat(start_str),
-                    datetime.datetime.fromisoformat(end_str),
-                ))
-        return parsed_busy
-
-    async def get_all_slots_for_date(self, date_str: str) -> list[str]:
         try:
-            target_date = datetime.date.fromisoformat(date_str.strip())
-        except ValueError:
+            res = service.freebusy().query(body=body).execute()
+            calendars = res.get("calendars", {})
+            cal_data = calendars.get(cal_id)
+            if not cal_data and len(calendars) == 1:
+                cal_data = next(iter(calendars.values()))
+            if cal_data and "errors" in cal_data:
+                logger.error("Google Calendar freebusy returned errors for calendar %s: %s", cal_id, cal_data["errors"])
+            busy_items = cal_data.get("busy", []) if cal_data else []
+
+            parsed_busy: list[tuple[datetime.datetime, datetime.datetime]] = []
+            for item in busy_items:
+                start_str = item.get("start")
+                end_str = item.get("end")
+                if start_str and end_str:
+                    b_start = datetime.datetime.fromisoformat(start_str)
+                    b_end = datetime.datetime.fromisoformat(end_str)
+                    if b_start.tzinfo is None:
+                        b_start = b_start.replace(tzinfo=tz)
+                    if b_end.tzinfo is None:
+                        b_end = b_end.replace(tzinfo=tz)
+                    parsed_busy.append((b_start, b_end))
+            return parsed_busy
+        except Exception as exc:
+            logger.error("Failed to query Google Calendar freebusy: %s", exc)
             return []
 
+    async def get_all_slots_for_date(self, date_str: str) -> list[str]:
         tz = self._get_timezone()
+        target_date = parse_flexible_date(date_str, tz)
+        if not target_date:
+            return []
+
         google_busy: list[tuple[datetime.datetime, datetime.datetime]] = []
         if settings.CALENDAR_BACKEND == "google":
             google_busy = await asyncio.to_thread(self._sync_query_google_busy, target_date)
 
         slots: list[str] = []
+        now = datetime.datetime.now(tz)
         duration = settings.APPOINTMENT_DEFAULT_DURATION_MINUTES
         for hour in range(9, 18):
             for minute in (0, 30):
                 slot_dt = datetime.datetime.combine(target_date, datetime.time(hour, minute), tzinfo=tz)
+                if target_date == now.date() and slot_dt <= now:
+                    continue
+
                 slot_end = slot_dt + datetime.timedelta(minutes=duration)
                 slot_iso = f"{target_date.isoformat()}T{hour:02d}:{minute:02d}:00"
 
@@ -163,9 +245,9 @@ class CalendarService:
         return grouped
 
     async def find_nearby_available_slots(self, date_str: str, max_days: int = 3) -> list[tuple[str, list[str]]]:
-        try:
-            target_date = datetime.date.fromisoformat(date_str.strip())
-        except ValueError:
+        tz = self._get_timezone()
+        target_date = parse_flexible_date(date_str, tz)
+        if not target_date:
             return []
 
         nearby: list[tuple[str, list[str]]] = []
@@ -182,10 +264,12 @@ class CalendarService:
         normalized_slot: str,
         patient_name: str,
         patient_phone: str,
+        slot_dt: datetime.datetime | None = None,
     ) -> dict[str, Any]:
         with self._write_lock:
             tz = self._get_timezone()
-            slot_dt = datetime.datetime.fromisoformat(normalized_slot)
+            if slot_dt is None:
+                slot_dt = datetime.datetime.fromisoformat(normalized_slot)
             if slot_dt.tzinfo is None:
                 slot_dt = slot_dt.replace(tzinfo=tz)
             slot_end = slot_dt + datetime.timedelta(minutes=settings.APPOINTMENT_DEFAULT_DURATION_MINUTES)
@@ -209,6 +293,8 @@ class CalendarService:
                     cal_data = calendars.get(cal_id)
                     if not cal_data and len(calendars) == 1:
                         cal_data = next(iter(calendars.values()))
+                    if cal_data and "errors" in cal_data:
+                        logger.error("Google Calendar freebusy returned errors for calendar %s: %s", cal_id, cal_data["errors"])
                     busy_list = cal_data.get("busy", []) if cal_data else []
 
                     for b in busy_list:
@@ -225,8 +311,8 @@ class CalendarService:
                             }
 
                     event_body = {
-                        "summary": f"Appointment: {patient_name}",
-                        "description": f"Booked via Voice Receptionist for {patient_name}. Contact: {patient_phone}",
+                        "summary": f"Appointment: {patient_name.strip()}",
+                        "description": f"Booked via Voice Receptionist for {patient_name.strip()}. Contact: {patient_phone.strip()}",
                         "start": {
                             "dateTime": time_min,
                             "timeZone": settings.CLINIC_TIMEZONE,
@@ -281,17 +367,24 @@ class CalendarService:
         patient_name: str,
         patient_phone: str,
     ) -> dict[str, Any]:
-        raw = slot_time.strip()
-        normalized_slot = raw.replace(" ", "T")
-        if len(normalized_slot) == 16:
-            normalized_slot = f"{normalized_slot}:00"
+        tz = self._get_timezone()
+        parsed_dt = parse_flexible_slot(slot_time, tz)
+        if not parsed_dt:
+            logger.warning("Failed to parse slot_time '%s' for booking.", slot_time)
+            return {
+                "success": False,
+                "error": "The appointment time could not be understood. Please specify a clear date and time.",
+            }
 
+        normalized_slot = parsed_dt.strftime("%Y-%m-%dT%H:%M:00")
         return await asyncio.to_thread(
             self._sync_check_and_book_slot,
             normalized_slot,
             patient_name,
             patient_phone,
+            parsed_dt,
         )
 
 
 calendar_service = CalendarService()
+

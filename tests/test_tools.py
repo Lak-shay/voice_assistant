@@ -214,3 +214,154 @@ async def test_calendar_service_thread_concurrency_lock():
     assert len(successes) == 1
     assert len(failures) == 1
     assert "taken" in failures[0]["error"]
+
+
+def test_parse_flexible_date():
+    from zoneinfo import ZoneInfo
+    from tools.calendar_service import parse_flexible_date
+    import datetime
+
+    tz = ZoneInfo("America/New_York")
+    base = datetime.datetime.now(tz).date()
+
+    assert parse_flexible_date("today", tz) == base
+    assert parse_flexible_date("tomorrow", tz) == base + datetime.timedelta(days=1)
+    assert parse_flexible_date("yesterday", tz) == base - datetime.timedelta(days=1)
+    assert parse_flexible_date("2026-10-05", tz) == datetime.date(2026, 10, 5)
+    assert parse_flexible_date("October 5th, 2026", tz) == datetime.date(2026, 10, 5)
+    assert parse_flexible_date("10/05/2026", tz) == datetime.date(2026, 10, 5)
+    assert parse_flexible_date("invalid-nonsense", tz) is None
+
+
+def test_parse_flexible_slot():
+    from zoneinfo import ZoneInfo
+    from tools.calendar_service import parse_flexible_slot
+    import datetime
+
+    tz = ZoneInfo("America/New_York")
+    base = datetime.date(2026, 10, 5)
+
+    res1 = parse_flexible_slot("2026-10-05T10:00:00", tz, default_date=base)
+    assert res1 == datetime.datetime(2026, 10, 5, 10, 0, tzinfo=tz)
+
+    res2 = parse_flexible_slot("2026-10-05 10:00 AM", tz, default_date=base)
+    assert res2 == datetime.datetime(2026, 10, 5, 10, 0, tzinfo=tz)
+
+    res3 = parse_flexible_slot("October 5th at 10:00 AM", tz, default_date=base)
+    assert res3 == datetime.datetime(2026, 10, 5, 10, 0, tzinfo=tz)
+
+    res4 = parse_flexible_slot("10:00 AM", tz, default_date=base)
+    assert res4 == datetime.datetime(2026, 10, 5, 10, 0, tzinfo=tz)
+
+    assert parse_flexible_slot("not-a-valid-time", tz) is None
+
+
+@pytest.mark.asyncio
+async def test_tool_book_appointment_natural_language():
+    mock_run_ctx = MagicMock()
+    result = await book_appointment(
+        mock_run_ctx,
+        patient_name="Alex Mercer",
+        patient_phone="(555) 234-5678",
+        slot_time="2026-10-15 10:00 AM",
+    )
+    assert "Alex Mercer" in result
+    assert "confirmed" in result.lower()
+
+
+@pytest.mark.asyncio
+async def test_tool_book_appointment_invalid_slot():
+    mock_run_ctx = MagicMock()
+    result = await book_appointment(
+        mock_run_ctx,
+        patient_name="Alex Mercer",
+        patient_phone="+15552345678",
+        slot_time="invalid time slot",
+    )
+    assert "could not be understood" in result.lower() or "unavailable" in result.lower()
+
+
+@pytest.mark.asyncio
+async def test_google_calendar_freebusy_error_handling(monkeypatch):
+    cal = CalendarService()
+    mock_google = MagicMock()
+    mock_google.freebusy.return_value.query.side_effect = Exception("API connection dropped")
+    cal._google_service = mock_google
+
+    import datetime
+    busy = cal._sync_query_google_busy(datetime.date(2026, 10, 5))
+    assert busy == []
+
+
+def test_get_sip_caller_phone_scenarios():
+    from tools.appointment_tools import get_sip_caller_phone
+
+    # 1. SIP attribute from room remote participants
+    mock_participant = MagicMock()
+    mock_participant.attributes = {"sip.phoneNumber": "+18455551234"}
+    mock_room = MagicMock()
+    mock_room.remote_participants = {"p1": mock_participant}
+    assert get_sip_caller_phone(mock_room) == "+18455551234"
+
+    # 2. Unformatted phone number in sip.phoneNumber attribute sanitized to E.164
+    mock_participant_raw = MagicMock()
+    mock_participant_raw.attributes = {"sip.phoneNumber": "(845) 555-9876"}
+    mock_room_raw = MagicMock()
+    mock_room_raw.remote_participants = {"p2": mock_participant_raw}
+    assert get_sip_caller_phone(mock_room_raw) == "+18455559876"
+
+    # 4. WebRTC / Playground participant with no SIP phone
+    mock_web_participant = MagicMock()
+    mock_web_participant.attributes = {}
+    mock_web_participant.identity = "playground_user_abc"
+    mock_web_room = MagicMock()
+    mock_web_room.remote_participants = {"p4": mock_web_participant}
+    assert get_sip_caller_phone(mock_web_room) is None
+
+    # 5. Empty room
+    assert get_sip_caller_phone(None) is None
+
+
+@pytest.mark.asyncio
+async def test_tool_book_appointment_with_explicit_phone():
+    mock_ctx = MagicMock()
+    result = await book_appointment(
+        mock_ctx,
+        patient_name="Alex Mercer",
+        patient_phone="+18453334444",
+        slot_time="2026-10-18T11:00:00",
+    )
+    assert "Alex Mercer" in result
+    assert "confirmed" in result.lower()
+
+
+@pytest.mark.asyncio
+async def test_tool_book_appointment_rejects_invalid_phone():
+    mock_ctx = MagicMock()
+    result = await book_appointment(
+        mock_ctx,
+        patient_name="Alex Mercer",
+        patient_phone="not-a-number",
+        slot_time="2026-10-18T11:00:00",
+    )
+    assert "valid phone number is required" in result.lower()
+
+
+@pytest.mark.asyncio
+async def test_tool_send_confirmation_sms_requires_valid_phone():
+    mock_ctx = MagicMock()
+    res_valid = await send_confirmation_sms(
+        mock_ctx,
+        patient_phone="+18453334444",
+        appointment_summary="October 18th at 11 AM",
+    )
+    assert "confirmation text" in res_valid.lower()
+
+    res_invalid = await send_confirmation_sms(
+        mock_ctx,
+        patient_phone="123",
+        appointment_summary="October 18th at 11 AM",
+    )
+    assert "valid phone number is required" in res_invalid.lower()
+
+
