@@ -52,7 +52,7 @@ class Settings(BaseSettings):
     CLINIC_TIMEZONE: str
     APPOINTMENT_DEFAULT_DURATION_MINUTES: int
 
-    # Integrations (mock, google, calcom, telnyx)
+    # Integrations (mock, google, telnyx)
     CALENDAR_BACKEND: str
     CALENDAR_API_KEY: str
     CALENDAR_ID: str

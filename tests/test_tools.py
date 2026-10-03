@@ -1,13 +1,22 @@
+import asyncio
+import datetime
 from unittest.mock import AsyncMock, MagicMock
+from zoneinfo import ZoneInfo
 import pytest
 
 from tools.appointment_tools import (
     book_appointment,
     check_availability,
     format_slot_phonetically,
+    get_sip_caller_phone,
     send_confirmation_sms,
 )
-from tools.calendar_service import CalendarService, calendar_service
+from tools.calendar_service import (
+    CalendarService,
+    calendar_service,
+    parse_flexible_date,
+    parse_flexible_slot,
+)
 from tools.sms_service import SMSService
 
 
@@ -26,13 +35,13 @@ def test_format_slot_phonetically():
 
 
 @pytest.mark.asyncio
-async def test_calendar_service_available_slots():
+async def test_calendar_service_all_slots():
     cal = CalendarService()
-    slots = await cal.get_available_slots("2026-09-15")
+    slots = await cal.get_all_slots_for_date("2026-09-15")
     assert len(slots) > 0
     assert "2026-09-15T09:00:00" in slots
 
-    invalid_slots = await cal.get_available_slots("not-a-date")
+    invalid_slots = await cal.get_all_slots_for_date("not-a-date")
     assert invalid_slots == []
 
 
@@ -79,11 +88,8 @@ async def test_tool_check_availability():
 
 @pytest.mark.asyncio
 async def test_tool_check_availability_partial_slots(monkeypatch):
-    from tools.calendar_service import calendar_service
-
     mock_run_ctx = MagicMock()
 
-    # Single opening in morning only
     monkeypatch.setattr(
         calendar_service,
         "get_slots_by_period",
@@ -92,7 +98,6 @@ async def test_tool_check_availability_partial_slots(monkeypatch):
     res_one = await check_availability(mock_run_ctx, preferred_date="2026-09-12")
     assert "an opening on" in res_one
 
-    # Morning and afternoon available, but evening unavailable
     monkeypatch.setattr(
         calendar_service,
         "get_slots_by_period",
@@ -102,7 +107,6 @@ async def test_tool_check_availability_partial_slots(monkeypatch):
     assert "morning and afternoon" in res_two
     assert "evening" not in res_two
 
-    # Specific time requested that is unavailable -> only offer morning and afternoon
     res_time_unavailable = await check_availability(
         mock_run_ctx,
         preferred_date="2026-09-12",
@@ -112,7 +116,6 @@ async def test_tool_check_availability_partial_slots(monkeypatch):
     assert "morning and afternoon" in res_time_unavailable
     assert "evening" not in res_time_unavailable
 
-    # Customer specifies preferred period
     res_period = await check_availability(
         mock_run_ctx,
         preferred_date="2026-09-12",
@@ -199,7 +202,6 @@ async def test_google_calendar_slot_busy_rejection():
 
 @pytest.mark.asyncio
 async def test_calendar_service_thread_concurrency_lock():
-    import asyncio
     cal = CalendarService()
     slot = "2026-11-01T14:00:00"
 
@@ -217,10 +219,6 @@ async def test_calendar_service_thread_concurrency_lock():
 
 
 def test_parse_flexible_date():
-    from zoneinfo import ZoneInfo
-    from tools.calendar_service import parse_flexible_date
-    import datetime
-
     tz = ZoneInfo("America/New_York")
     base = datetime.datetime.now(tz).date()
 
@@ -234,10 +232,6 @@ def test_parse_flexible_date():
 
 
 def test_parse_flexible_slot():
-    from zoneinfo import ZoneInfo
-    from tools.calendar_service import parse_flexible_slot
-    import datetime
-
     tz = ZoneInfo("America/New_York")
     base = datetime.date(2026, 10, 5)
 
@@ -288,29 +282,24 @@ async def test_google_calendar_freebusy_error_handling(monkeypatch):
     mock_google.freebusy.return_value.query.side_effect = Exception("API connection dropped")
     cal._google_service = mock_google
 
-    import datetime
     busy = cal._sync_query_google_busy(datetime.date(2026, 10, 5))
     assert busy == []
 
 
 def test_get_sip_caller_phone_scenarios():
-    from tools.appointment_tools import get_sip_caller_phone
 
-    # 1. SIP attribute from room remote participants
     mock_participant = MagicMock()
     mock_participant.attributes = {"sip.phoneNumber": "+18455551234"}
     mock_room = MagicMock()
     mock_room.remote_participants = {"p1": mock_participant}
     assert get_sip_caller_phone(mock_room) == "+18455551234"
 
-    # 2. Unformatted phone number in sip.phoneNumber attribute sanitized to E.164
     mock_participant_raw = MagicMock()
     mock_participant_raw.attributes = {"sip.phoneNumber": "(845) 555-9876"}
     mock_room_raw = MagicMock()
     mock_room_raw.remote_participants = {"p2": mock_participant_raw}
     assert get_sip_caller_phone(mock_room_raw) == "+18455559876"
 
-    # 4. WebRTC / Playground participant with no SIP phone
     mock_web_participant = MagicMock()
     mock_web_participant.attributes = {}
     mock_web_participant.identity = "playground_user_abc"
@@ -318,7 +307,6 @@ def test_get_sip_caller_phone_scenarios():
     mock_web_room.remote_participants = {"p4": mock_web_participant}
     assert get_sip_caller_phone(mock_web_room) is None
 
-    # 5. Empty room
     assert get_sip_caller_phone(None) is None
 
 

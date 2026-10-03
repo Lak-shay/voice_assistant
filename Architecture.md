@@ -38,10 +38,10 @@
          ▼                                                  ▼
  ┌────────────────────────┐                    ┌────────────────────────┐
  │   External Integrations│                    │ Observability          │
- │  ├── Google Cal / EMR  │                    │ └── Langfuse           │
- │  ├── Airtable (Hours)  │                    │     ├── Traces & Logs  │
- │  └── Telnyx SMS (Conf) │                    │     ├── Token Costs    │
- └────────────────────────┘                    │     └── Latency (TTFT) │
+ │  ├── Google Calendar   │                    │ └── Langfuse           │
+ │  └── Telnyx SMS (Conf) │                    │     ├── Traces & Logs  │
+ └────────────────────────┘                    │     ├── Token Costs    │
+                                               │     └── Latency (TTFT) │
                                                └────────────────────────┘
 
 ```

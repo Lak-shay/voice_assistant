@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 import datetime
 import sys
-from typing import Dict, Optional, Tuple
+from typing import Optional, Tuple
 import aiohttp
 from livekit.api import LiveKitAPI
 from livekit.protocol.room import ListRoomsRequest
@@ -178,44 +178,22 @@ async def run_startup_checks(
         app_settings.APP_ENV,
     )
 
-    results: Dict[str, Tuple[bool, str]] = {}
+    checks = [
+        ("LiveKit Cloud", check_livekit_connection),
+        ("Langfuse Telemetry", check_langfuse_connection),
+        ("LiveKit Inference Models", check_model_configuration),
+        ("Telnyx Telephony", check_telnyx_connection),
+        ("Google Calendar", check_calendar_connection),
+    ]
 
-    livekit_ok, livekit_msg = await check_livekit_connection(app_settings)
-    results["LiveKit Cloud"] = (livekit_ok, livekit_msg)
-    if livekit_ok:
-        logger.info("[PASS] [LiveKit Cloud]: %s", livekit_msg)
-    else:
-        logger.error("[FAIL] [LiveKit Cloud]: %s", livekit_msg)
-
-    langfuse_ok, langfuse_msg = await check_langfuse_connection(app_settings)
-    results["Langfuse Telemetry"] = (langfuse_ok, langfuse_msg)
-    if langfuse_ok:
-        logger.info("[PASS] [Langfuse Telemetry]: %s", langfuse_msg)
-    else:
-        logger.error("[FAIL] [Langfuse Telemetry]: %s", langfuse_msg)
-
-    model_ok, model_msg = await check_model_configuration(app_settings)
-    results["LiveKit Inference Models"] = (model_ok, model_msg)
-    if model_ok:
-        logger.info("[PASS] [LiveKit Inference Models]: %s", model_msg)
-    else:
-        logger.error("[FAIL] [LiveKit Inference Models]: %s", model_msg)
-
-    telnyx_ok, telnyx_msg = await check_telnyx_connection(app_settings)
-    results["Telnyx Telephony"] = (telnyx_ok, telnyx_msg)
-    if telnyx_ok:
-        logger.info("[PASS] [Telnyx Telephony]: %s", telnyx_msg)
-    else:
-        logger.error("[FAIL] [Telnyx Telephony]: %s", telnyx_msg)
-
-    cal_ok, cal_msg = await check_calendar_connection(app_settings)
-    results["Google Calendar"] = (cal_ok, cal_msg)
-    if cal_ok:
-        logger.info("[PASS] [Google Calendar]: %s", cal_msg)
-    else:
-        logger.error("[FAIL] [Google Calendar]: %s", cal_msg)
-
-    all_ok = livekit_ok and langfuse_ok and model_ok and telnyx_ok and cal_ok
+    all_ok = True
+    for label, check_fn in checks:
+        ok, msg = await check_fn(app_settings)
+        if ok:
+            logger.info("[PASS] [%s]: %s", label, msg)
+        else:
+            logger.error("[FAIL] [%s]: %s", label, msg)
+            all_ok = False
 
     if all_ok:
         logger.info(

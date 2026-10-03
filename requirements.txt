@@ -1,10 +1,7 @@
 # Core Agent Runtime
 livekit-agents>=1.8.0,<2.0.0
 
-# LiveKit Provider Plugins
-livekit-plugins-deepgram>=1.4.0,<2.0.0
-livekit-plugins-cartesia>=1.4.0,<2.0.0
-livekit-plugins-openai>=1.4.0,<2.0.0
+# LiveKit VAD Plugin
 livekit-plugins-silero>=1.4.0,<2.0.0
 
 # Observability & Tracing

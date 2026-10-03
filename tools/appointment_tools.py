@@ -13,23 +13,32 @@ from logger import logger
 from tools.calendar_service import (
     calendar_service,
     parse_flexible_date,
-    parse_flexible_slot,
 )
 from tools.sms_service import sanitize_e164, sms_service
+
+
+def _ordinal_suffix(day: int) -> str:
+    if 11 <= (day % 100) <= 13:
+        return "th"
+    return {1: "st", 2: "nd", 3: "rd"}.get(day % 10, "th")
+
+
+def _format_spoken_slot_choices(spoken: list[str], prefix: str = "We have ") -> str:
+    if len(spoken) == 1:
+        return f"{prefix}an opening on {spoken[0]}. Does that time suit you?"
+    if len(spoken) == 2:
+        return f"{prefix}openings on {spoken[0]} or {spoken[1]}. Which time suits you best?"
+    return f"{prefix}openings on {spoken[0]}, {spoken[1]}, or {spoken[2]}. Which time suits you best?"
+
+
+def _get_active_periods(slots: list[str]) -> list[str]:
+    return [p for p in ("morning", "afternoon", "evening") if any(calendar_service.classify_period(s) == p for s in slots)]
 
 
 def format_date_phonetically(date_str: str) -> str:
     try:
         dt = datetime.date.fromisoformat(date_str.strip())
-        day_suffix = "th"
-        if dt.day in (1, 21, 31):
-            day_suffix = "st"
-        elif dt.day in (2, 22):
-            day_suffix = "nd"
-        elif dt.day in (3, 23):
-            day_suffix = "rd"
-        month_name = dt.strftime("%B")
-        return f"{month_name} {dt.day}{day_suffix}"
+        return f"{dt.strftime('%B')} {dt.day}{_ordinal_suffix(dt.day)}"
     except Exception:
         return date_str
 
@@ -37,21 +46,12 @@ def format_date_phonetically(date_str: str) -> str:
 def format_slot_phonetically(slot_iso: str) -> str:
     try:
         dt = datetime.datetime.fromisoformat(slot_iso)
-        day_suffix = "th"
-        if dt.day in (1, 21, 31):
-            day_suffix = "st"
-        elif dt.day in (2, 22):
-            day_suffix = "nd"
-        elif dt.day in (3, 23):
-            day_suffix = "rd"
-
         month_name = dt.strftime("%B")
         hour = dt.strftime("%I").lstrip("0")
         minute = dt.strftime("%M")
         am_pm = dt.strftime("%p")
-
         time_str = f"{hour} {minute} {am_pm}" if minute != "00" else f"{hour} {am_pm}"
-        return f"{month_name} {dt.day}{day_suffix} at {time_str}"
+        return f"{month_name} {dt.day}{_ordinal_suffix(dt.day)} at {time_str}"
     except Exception:
         return slot_iso
 
@@ -119,7 +119,7 @@ async def check_availability(
             if nearby:
                 next_date, next_slots = nearby[0]
                 next_date_phonetic = format_date_phonetically(next_date)
-                next_periods = [p for p in ("morning", "afternoon", "evening") if any(calendar_service.classify_period(s) == p for s in next_slots)]
+                next_periods = _get_active_periods(next_slots)
                 return f"We are fully booked on {phonetic_date}. The closest openings around that time are on {next_date_phonetic} in the {' and '.join(next_periods)}. Would you like to check that day?"
             return f"I could not find any open slots around {phonetic_date} for {settings.CLINIC_NAME}. Would you like to check another week?"
 
@@ -128,11 +128,7 @@ async def check_availability(
             period_slots = slots_by_period.get(period_key, [])
             if period_slots:
                 spoken = [format_slot_phonetically(s) for s in period_slots[:3]]
-                if len(spoken) == 1:
-                    return f"In the {period_key} on {phonetic_date}, we have an opening on {spoken[0]}. Does that time suit you?"
-                if len(spoken) == 2:
-                    return f"In the {period_key} on {phonetic_date}, we have openings on {spoken[0]} or {spoken[1]}. Which time suits you best?"
-                return f"In the {period_key} on {phonetic_date}, we have openings on {spoken[0]}, {spoken[1]}, or {spoken[2]}. Which time suits you best?"
+                return _format_spoken_slot_choices(spoken, prefix=f"In the {period_key} on {phonetic_date}, we have ")
 
             if available_periods:
                 return f"We have no {period_key} openings on {phonetic_date}, but we have slots in the {' and '.join(available_periods)}. Would either of those work for you?"
@@ -142,19 +138,14 @@ async def check_availability(
             if nearby:
                 next_date, next_slots = nearby[0]
                 next_date_phonetic = format_date_phonetically(next_date)
-                next_periods = [p for p in ("morning", "afternoon", "evening") if any(calendar_service.classify_period(s) == p for s in next_slots)]
+                next_periods = _get_active_periods(next_slots)
                 return f"I could not find any open slots on that date for {settings.CLINIC_NAME}. The closest openings are on {next_date_phonetic} in the {' and '.join(next_periods)}. Would you like to check that day?"
             return f"I could not find any open slots on that date for {settings.CLINIC_NAME}. Would you like to check another day?"
 
         if len(available_periods) == 1:
             period_name = available_periods[0]
-            period_slots = slots_by_period[period_name]
-            spoken = [format_slot_phonetically(s) for s in period_slots[:3]]
-            if len(spoken) == 1:
-                return f"We have an opening on {spoken[0]}. Does that time suit you?"
-            if len(spoken) == 2:
-                return f"We have openings on {spoken[0]} or {spoken[1]}. Which time suits you best?"
-            return f"We have openings on {spoken[0]}, {spoken[1]}, or {spoken[2]}. Which time suits you best?"
+            spoken = [format_slot_phonetically(s) for s in slots_by_period[period_name][:3]]
+            return _format_spoken_slot_choices(spoken)
 
         if len(available_periods) == 2:
             return f"On {phonetic_date}, we have openings in the {available_periods[0]} and {available_periods[1]}. Would you prefer {available_periods[0]} or {available_periods[1]}?"

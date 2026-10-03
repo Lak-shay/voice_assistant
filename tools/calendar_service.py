@@ -149,16 +149,24 @@ class CalendarService:
         except Exception:
             return "afternoon"
 
-    def _sync_query_google_busy(self, target_date: datetime.date) -> list[tuple[datetime.datetime, datetime.datetime]]:
+    def _sync_query_google_busy(
+        self,
+        target_date: datetime.date | None = None,
+        time_min: str | None = None,
+        time_max: str | None = None,
+    ) -> list[tuple[datetime.datetime, datetime.datetime]]:
         service = self._get_google_service()
         if not service:
             return []
 
         tz = self._get_timezone()
-        time_min = datetime.datetime.combine(target_date, datetime.time(9, 0), tzinfo=tz).isoformat()
-        time_max = datetime.datetime.combine(target_date, datetime.time(17, 30), tzinfo=tz).isoformat()
-        cal_id = settings.CALENDAR_ID or "primary"
+        if time_min is None or time_max is None:
+            if target_date is None:
+                return []
+            time_min = datetime.datetime.combine(target_date, datetime.time(9, 0), tzinfo=tz).isoformat()
+            time_max = datetime.datetime.combine(target_date, datetime.time(17, 30), tzinfo=tz).isoformat()
 
+        cal_id = settings.CALENDAR_ID or "primary"
         body = {
             "timeMin": time_min,
             "timeMax": time_max,
@@ -228,10 +236,6 @@ class CalendarService:
 
         return slots
 
-    async def get_available_slots(self, date_str: str) -> list[str]:
-        all_slots = await self.get_all_slots_for_date(date_str)
-        return all_slots[:6]
-
     async def get_slots_by_period(self, date_str: str) -> dict[str, list[str]]:
         all_slots = await self.get_all_slots_for_date(date_str)
         grouped: dict[str, list[str]] = {
@@ -281,34 +285,12 @@ class CalendarService:
                 time_max = slot_end.isoformat()
 
                 try:
-                    fb_res = service.freebusy().query(
-                        body={
-                            "timeMin": time_min,
-                            "timeMax": time_max,
-                            "timeZone": settings.CLINIC_TIMEZONE,
-                            "items": [{"id": cal_id}],
+                    busy_list = self._sync_query_google_busy(time_min=time_min, time_max=time_max)
+                    if any(slot_dt < b_end and slot_end > b_start for b_start, b_end in busy_list):
+                        return {
+                            "success": False,
+                            "error": "This slot was just taken. Please select another open time.",
                         }
-                    ).execute()
-                    calendars = fb_res.get("calendars", {})
-                    cal_data = calendars.get(cal_id)
-                    if not cal_data and len(calendars) == 1:
-                        cal_data = next(iter(calendars.values()))
-                    if cal_data and "errors" in cal_data:
-                        logger.error("Google Calendar freebusy returned errors for calendar %s: %s", cal_id, cal_data["errors"])
-                    busy_list = cal_data.get("busy", []) if cal_data else []
-
-                    for b in busy_list:
-                        b_start = datetime.datetime.fromisoformat(b["start"])
-                        b_end = datetime.datetime.fromisoformat(b["end"])
-                        if b_start.tzinfo is None:
-                            b_start = b_start.replace(tzinfo=tz)
-                        if b_end.tzinfo is None:
-                            b_end = b_end.replace(tzinfo=tz)
-                        if slot_dt < b_end and slot_end > b_start:
-                            return {
-                                "success": False,
-                                "error": "This slot was just taken. Please select another open time.",
-                            }
 
                     event_body = {
                         "summary": f"Appointment: {patient_name.strip()}",
