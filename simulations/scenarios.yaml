@@ -1,0 +1,226 @@
+name: Clinic Receptionist 10-Caller Concurrent Suite
+scenarios:
+  - label: Caller 1 - Alex Taylor (Caller ID, Tomorrow Morning)
+    instructions: |
+      PERSONA: Alex Taylor, polite and direct. Calling to book an appointment.
+      OPENING LINE: "Hi, I'd like to book an appointment for tomorrow morning."
+      FACTS:
+      - Preferred period: morning
+      - Full name: Alex Taylor
+      - Caller ID is already available: +15551234567
+      DO, IN ORDER:
+      1. Ask for tomorrow morning openings.
+      2. When offered slots, pick the first morning slot.
+      3. Give your full name (Alex Taylor) when the agent asks.
+      4. When the agent asks to confirm, say "Yes, please confirm that."
+      5. Say "Thank you, goodbye" and end the conversation once confirmed.
+    agent_expectations: |
+      The agent must check availability for tomorrow, offer available morning slots,
+      ask for caller's full name, confirm the chosen date and time, call book_appointment,
+      and send a confirmation text.
+    tags:
+      feature: booking
+    userdata:
+      caller_phone: "+15551234567"
+      expected_booking:
+        patient_name: "Alex Taylor"
+        patient_phone: "+15551234567"
+
+  - label: Caller 2 - Morgan Smith (No Caller ID, Friday Afternoon)
+    instructions: |
+      PERSONA: Morgan Smith. Calling from an unlisted number.
+      OPENING LINE: "Hello, I need to schedule an appointment for this Friday afternoon."
+      FACTS:
+      - Preferred date: Friday
+      - Preferred period: afternoon
+      - Full name: Morgan Smith
+      - Phone number: "555-987-6543" (only provide when asked)
+      DO, IN ORDER:
+      1. Request Friday afternoon availability.
+      2. When slots are provided, select an afternoon opening.
+      3. When the agent asks for your name and phone number, provide "Morgan Smith" and "555-987-6543".
+      4. Confirm the details and say thank you.
+    agent_expectations: |
+      Because no caller ID is present, the agent must ask for both the caller's full name
+      and phone number, read back the appointment date, time, and phone number to confirm,
+      call book_appointment, and dispatch confirmation SMS.
+    tags:
+      feature: booking
+    userdata:
+      caller_phone: null
+      expected_booking:
+        patient_name: "Morgan Smith"
+        patient_phone: "+15559876543"
+
+  - label: Caller 3 - Casey Miller (Reschedule Mid-Call)
+    instructions: |
+      PERSONA: Casey Miller. A bit indecisive.
+      OPENING LINE: "Hi, I'd like to check if you have any slots next Monday morning?"
+      FACTS:
+      - Full name: Casey Miller
+      DO, IN ORDER:
+      1. Ask for next Monday morning openings.
+      2. When the agent lists Monday slots, change your mind: "Actually, wait, Monday won't work for me. Could we check next Tuesday afternoon instead?"
+      3. When the agent provides Tuesday afternoon slots, pick one.
+      4. Provide your name Casey Miller and confirm the booking.
+    agent_expectations: |
+      The agent must cleanly pivot to checking Tuesday afternoon, list Tuesday afternoon openings,
+      collect name, and complete the booking for Tuesday (not Monday).
+    tags:
+      feature: reschedule
+    userdata:
+      caller_phone: "+15552345678"
+      expected_booking:
+        patient_name: "Casey Miller"
+        patient_phone: "+15552345678"
+
+  - label: Caller 4 - Jordan Lee (Next Wednesday Morning)
+    instructions: |
+      PERSONA: Jordan Lee, busy executive.
+      OPENING LINE: "Hello, do you have any openings next Wednesday morning?"
+      FACTS:
+      - Full name: Jordan Lee
+      DO, IN ORDER:
+      1. Ask for next Wednesday morning.
+      2. Select a morning slot.
+      3. Provide full name Jordan Lee.
+      4. Confirm and thank the receptionist.
+    agent_expectations: |
+      The agent must check availability for next Wednesday morning, offer slots, collect full name,
+      confirm, and book the slot.
+    tags:
+      feature: booking
+    userdata:
+      caller_phone: "+15553456789"
+      expected_booking:
+        patient_name: "Jordan Lee"
+        patient_phone: "+15553456789"
+
+  - label: Caller 5 - Sam Rivera (Inquiry then Thursday Booking)
+    instructions: |
+      PERSONA: Sam Rivera, new patient.
+      OPENING LINE: "Hi there, what are your clinic hours and do you have any appointments next Thursday morning?"
+      FACTS:
+      - Full name: Sam Rivera
+      DO, IN ORDER:
+      1. Ask about clinic hours and Thursday morning availability.
+      2. When slots are provided, select a morning slot.
+      3. Give your name Sam Rivera and confirm the booking.
+    agent_expectations: |
+      The agent must briefly answer and check next Thursday morning slots, collect caller's name,
+      confirm the appointment, and book the slot.
+    tags:
+      feature: inquiry
+    userdata:
+      caller_phone: "+15554567890"
+      expected_booking:
+        patient_name: "Sam Rivera"
+        patient_phone: "+15554567890"
+
+  - label: Caller 6 - Taylor Brooks (Late Afternoon Slot)
+    instructions: |
+      PERSONA: Taylor Brooks, student.
+      OPENING LINE: "Hi, I can only come after four PM next Tuesday. Do you have any late afternoon openings?"
+      FACTS:
+      - Full name: Taylor Brooks
+      DO, IN ORDER:
+      1. Request next Tuesday after 4 PM.
+      2. Choose the suggested late afternoon or evening slot.
+      3. Provide name Taylor Brooks and confirm.
+    agent_expectations: |
+      The agent must check Tuesday afternoon/evening slots, offer appropriate openings after 4 PM,
+      collect name, and book the appointment.
+    tags:
+      feature: booking
+    userdata:
+      caller_phone: "+15555678901"
+      expected_booking:
+        patient_name: "Taylor Brooks"
+        patient_phone: "+15555678901"
+
+  - label: Caller 7 - Jamie Chen (Next Monday Afternoon)
+    instructions: |
+      PERSONA: Jamie Chen, polite caller.
+      OPENING LINE: "Hello! Could you help me book a visit for next Monday afternoon?"
+      FACTS:
+      - Full name: Jamie Chen
+      DO, IN ORDER:
+      1. Request next Monday afternoon.
+      2. Select a time.
+      3. Provide name Jamie Chen when asked.
+      4. Confirm the booking.
+    agent_expectations: |
+      The agent must check availability for Monday afternoon, offer slots, collect full name,
+      confirm, and book the appointment.
+    tags:
+      feature: booking
+    userdata:
+      caller_phone: "+15556789012"
+      expected_booking:
+        patient_name: "Jamie Chen"
+        patient_phone: "+15556789012"
+
+  - label: Caller 8 - Riley Davis (No Caller ID, Next Wednesday)
+    instructions: |
+      PERSONA: Riley Davis, calling from a private work phone.
+      OPENING LINE: "Good morning, I would like to book a slot for next Wednesday at eleven AM if possible."
+      FACTS:
+      - Full name: Riley Davis
+      - Phone number: "555-432-1098" (provide only when asked)
+      DO, IN ORDER:
+      1. Ask for next Wednesday at 11 AM.
+      2. If 11 AM is available, select it. If not, pick the closest morning slot.
+      3. Provide name Riley Davis and phone 555-432-1098 when asked.
+      4. Confirm the booking details.
+    agent_expectations: |
+      The agent must request name and phone number since caller ID is absent, confirm details,
+      and book the appointment.
+    tags:
+      feature: booking
+    userdata:
+      caller_phone: null
+      expected_booking:
+        patient_name: "Riley Davis"
+        patient_phone: "+15554321098"
+
+  - label: Caller 9 - Avery Johnson (Next Friday Morning)
+    instructions: |
+      PERSONA: Avery Johnson, straightforward caller.
+      OPENING LINE: "Hi, do you have any appointments next Friday morning?"
+      FACTS:
+      - Full name: Avery Johnson
+      DO, IN ORDER:
+      1. Ask for next Friday morning.
+      2. Select a morning slot.
+      3. Provide name Avery Johnson.
+      4. Confirm and conclude the call.
+    agent_expectations: |
+      The agent must check Friday morning slots, offer choices, collect name, and book.
+    tags:
+      feature: booking
+    userdata:
+      caller_phone: "+15558901234"
+      expected_booking:
+        patient_name: "Avery Johnson"
+        patient_phone: "+15558901234"
+
+  - label: Caller 10 - Quinn Martinez (Direct Booking Next Thursday Afternoon)
+    instructions: |
+      PERSONA: Quinn Martinez, in a hurry.
+      OPENING LINE: "Hi, I need an appointment for next Thursday afternoon around two PM."
+      FACTS:
+      - Full name: Quinn Martinez
+      DO, IN ORDER:
+      1. Ask for next Thursday afternoon around 2 PM.
+      2. Select 2 PM or closest available time.
+      3. Provide name Quinn Martinez when asked.
+      4. Confirm booking.
+    agent_expectations: |
+      The agent must check availability, confirm a slot, collect name, and complete booking.
+    tags:
+      feature: booking
+    userdata:
+      caller_phone: "+15559012345"
+      expected_booking:
+        patient_name: "Quinn Martinez"
+        patient_phone: "+15559012345"

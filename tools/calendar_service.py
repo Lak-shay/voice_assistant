@@ -5,7 +5,10 @@ import datetime
 import json
 import os
 import re
+import sqlite3
+import tempfile
 import threading
+import time
 from typing import Any
 from zoneinfo import ZoneInfo
 from dateutil import parser
@@ -93,11 +96,60 @@ def parse_flexible_slot(
 class CalendarService:
     GOOGLE_SCOPES = ["https://www.googleapis.com/auth/calendar"]
 
-    def __init__(self) -> None:
+    def __init__(self, db_path: str | None = None) -> None:
         self._in_memory_bookings: set[str] = set()
         self._write_lock = threading.Lock()
         self._google_service: Any = None
         self._google_init_attempted = False
+        self._db_path = db_path or os.path.join(tempfile.gettempdir(), "voice_assistant_bookings.db")
+        self._init_db()
+
+    def _init_db(self) -> None:
+        try:
+            with sqlite3.connect(self._db_path, timeout=10.0) as conn:
+                conn.execute(
+                    """
+                    CREATE TABLE IF NOT EXISTS booked_slots (
+                        slot_time TEXT PRIMARY KEY,
+                        patient_name TEXT,
+                        patient_phone TEXT,
+                        event_id TEXT,
+                        created_at REAL
+                    )
+                    """
+                )
+                conn.commit()
+        except Exception as exc:
+            logger.error("Failed to initialize booking database at %s: %s", self._db_path, exc)
+
+    def clear_reservations(self) -> None:
+        self._in_memory_bookings.clear()
+        try:
+            with sqlite3.connect(self._db_path, timeout=10.0) as conn:
+                cursor = conn.execute("SELECT event_id FROM booked_slots WHERE event_id IS NOT NULL")
+                event_ids = [row[0] for row in cursor.fetchall()]
+                conn.execute("DELETE FROM booked_slots")
+                conn.commit()
+
+            service = self._get_google_service()
+            if service and event_ids:
+                cal_id = settings.CALENDAR_ID or "primary"
+                for eid in event_ids:
+                    try:
+                        service.events().delete(calendarId=cal_id, eventId=eid).execute()
+                    except Exception:
+                        pass
+        except Exception as exc:
+            logger.error("Failed to clear reservations: %s", exc)
+
+    def _get_db_booked_slots(self, date_str: str) -> set[str]:
+        try:
+            with sqlite3.connect(self._db_path, timeout=5.0) as conn:
+                cursor = conn.execute("SELECT slot_time FROM booked_slots WHERE slot_time LIKE ?", (f"{date_str}%",))
+                return {row[0] for row in cursor.fetchall()}
+        except Exception as exc:
+            logger.debug("Failed to query DB booked slots: %s", exc)
+            return set()
 
     def _get_timezone(self) -> datetime.tzinfo:
         try:
@@ -212,6 +264,7 @@ class CalendarService:
 
         slots: list[str] = []
         now = datetime.datetime.now(tz)
+        db_booked = self._get_db_booked_slots(target_date.isoformat())
         duration = settings.APPOINTMENT_DEFAULT_DURATION_MINUTES
         for hour in range(9, 18):
             for minute in (0, 30):
@@ -222,7 +275,7 @@ class CalendarService:
                 slot_end = slot_dt + datetime.timedelta(minutes=duration)
                 slot_iso = f"{target_date.isoformat()}T{hour:02d}:{minute:02d}:00"
 
-                if slot_iso in self._in_memory_bookings:
+                if slot_iso in self._in_memory_bookings or slot_iso in db_booked:
                     continue
 
                 is_busy = False
@@ -278,6 +331,21 @@ class CalendarService:
                 slot_dt = slot_dt.replace(tzinfo=tz)
             slot_end = slot_dt + datetime.timedelta(minutes=settings.APPOINTMENT_DEFAULT_DURATION_MINUTES)
 
+            try:
+                with sqlite3.connect(self._db_path, timeout=15.0) as conn:
+                    conn.execute(
+                        "INSERT INTO booked_slots (slot_time, patient_name, patient_phone, created_at) VALUES (?, ?, ?, ?)",
+                        (normalized_slot, patient_name.strip(), patient_phone.strip(), time.time()),
+                    )
+                    conn.commit()
+            except sqlite3.IntegrityError:
+                return {
+                    "success": False,
+                    "error": "This slot was just taken. Please select another open time.",
+                }
+            except Exception as db_exc:
+                logger.error("Failed to insert slot reservation in DB: %s", db_exc)
+
             service = self._get_google_service()
             if service:
                 cal_id = settings.CALENDAR_ID or "primary"
@@ -287,6 +355,9 @@ class CalendarService:
                 try:
                     busy_list = self._sync_query_google_busy(time_min=time_min, time_max=time_max)
                     if any(slot_dt < b_end and slot_end > b_start for b_start, b_end in busy_list):
+                        with sqlite3.connect(self._db_path, timeout=10.0) as conn:
+                            conn.execute("DELETE FROM booked_slots WHERE slot_time = ?", (normalized_slot,))
+                            conn.commit()
                         return {
                             "success": False,
                             "error": "This slot was just taken. Please select another open time.",
@@ -305,34 +376,38 @@ class CalendarService:
                         },
                     }
                     created_event = service.events().insert(calendarId=cal_id, body=event_body).execute()
+                    event_id = created_event.get("id")
+                    with sqlite3.connect(self._db_path, timeout=10.0) as conn:
+                        conn.execute("UPDATE booked_slots SET event_id = ? WHERE slot_time = ?", (event_id, normalized_slot))
+                        conn.commit()
+
                     self._in_memory_bookings.add(normalized_slot)
                     return {
                         "success": True,
                         "slot_time": normalized_slot,
-                        "event_id": created_event.get("id"),
+                        "event_id": event_id,
                         "patient_name": patient_name.strip(),
                         "patient_phone": patient_phone.strip(),
                         "clinic_name": settings.CLINIC_NAME,
                     }
                 except HttpError as http_err:
                     logger.error("Google Calendar API HttpError: %s", http_err)
+                    with sqlite3.connect(self._db_path, timeout=10.0) as conn:
+                        conn.execute("DELETE FROM booked_slots WHERE slot_time = ?", (normalized_slot,))
+                        conn.commit()
                     return {
                         "success": False,
                         "error": "A temporary calendar error occurred. Please try again.",
                     }
                 except Exception as exc:
                     logger.error("Unexpected error during Google Calendar booking: %s", exc)
+                    with sqlite3.connect(self._db_path, timeout=10.0) as conn:
+                        conn.execute("DELETE FROM booked_slots WHERE slot_time = ?", (normalized_slot,))
+                        conn.commit()
                     return {
                         "success": False,
                         "error": "A temporary booking error occurred. Please try again.",
                     }
-
-            # Local / mock fallback mode
-            if normalized_slot in self._in_memory_bookings:
-                return {
-                    "success": False,
-                    "error": "This slot was just taken. Please select another open time.",
-                }
 
             self._in_memory_bookings.add(normalized_slot)
             return {

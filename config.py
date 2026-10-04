@@ -58,8 +58,9 @@ class Settings(BaseSettings):
     CALENDAR_ID: str
     SMS_BACKEND: str
 
-    # Timeouts
+    # Timeouts & Concurrency
     STARTUP_CHECK_TIMEOUT: float
+    NUM_IDLE_PROCESSES: int = 10
 
     model_config = SettingsConfigDict(
         env_file=get_active_env_file(),

@@ -5,11 +5,14 @@ import datetime
 import sys
 from typing import Optional, Tuple
 import aiohttp
+from langfuse import Langfuse
+from livekit.agents import inference
 from livekit.api import LiveKitAPI
 from livekit.protocol.room import ListRoomsRequest
 
 from config import Settings, settings as default_settings
 from logger import startup_logger as logger
+from tools.calendar_service import calendar_service
 
 
 async def check_livekit_connection(
@@ -33,7 +36,6 @@ async def check_livekit_connection(
 
 
 def _sync_langfuse_check(public_key: str, secret_key: str, host: str) -> bool:
-    from langfuse import Langfuse
     try:
         client = Langfuse(public_key=public_key, secret_key=secret_key, host=host)
         return bool(client.auth_check())
@@ -84,7 +86,6 @@ async def check_model_configuration(
         return False, f"Missing required model configurations: {', '.join(missing)}"
 
     try:
-        from livekit.agents import inference
         fallback_secret = "test_secret_with_minimum_32_bytes_for_jwt!"
         inference.STT(
             f"{settings.STT_PROVIDER}/{settings.STT_MODEL}",
@@ -150,7 +151,6 @@ async def check_calendar_connection(
         return False, "Missing CALENDAR_API_KEY while CALENDAR_BACKEND is 'google'"
 
     try:
-        from tools.calendar_service import calendar_service
         service = calendar_service._get_google_service()
         if not service:
             return False, "Failed to initialize Google Calendar client from configured credentials"

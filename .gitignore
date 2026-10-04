@@ -24,6 +24,15 @@ ENV/
 # Logs & temp files
 *.log
 temp/
+*.db
+*.db-journal
+*.db-wal
+
+# Simulation reports & run artifacts
+sim_*.json
+sim_report*.json
+simulation_*.json
+*.report.json
 
 # IDEs & System files
 .vscode/

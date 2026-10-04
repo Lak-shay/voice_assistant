@@ -74,7 +74,7 @@ The worker runs inside a Docker container (or local process) executing an asynch
 
 #### 4. Tool Execution & Data Layer
 
-* **`FunctionContext` Tools:** Encapsulates business logic. Tools execute asynchronously so the main WebRTC loop is never blocked:
+* **`@function_tool` Decorators:** Encapsulates business logic. Tools execute asynchronously so the main WebRTC loop is never blocked:
 * **`check_availability`:** Queries open slots via Google Calendar API (`freebusy.query`), grouping openings into morning, afternoon, and evening periods.
 * **`book_appointment`:** Protected by an atomic multithreading mutex lock (`_write_lock`). Performs an on-calendar verification (`freebusy.query`) to ensure the slot was not taken, then creates the calendar event (`events().insert`) before confirming.
 * **`send_confirmation_sms`:** Dispatches post-booking confirmation SMS via Telnyx REST API (`/v2/messages`).

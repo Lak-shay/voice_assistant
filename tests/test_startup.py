@@ -2,6 +2,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 from config import Settings
 from startup import (
+    _sync_langfuse_check,
     check_calendar_connection,
     check_langfuse_connection,
     check_livekit_connection,
@@ -103,7 +104,6 @@ async def test_check_langfuse_failure(mock_settings):
 
 
 def test_sync_langfuse_check_auth_check():
-    from startup import _sync_langfuse_check
     with patch("langfuse.Langfuse.auth_check", return_value=True):
         res = _sync_langfuse_check("pk-test", "sk-test", "https://cloud.langfuse.com")
         assert res is True

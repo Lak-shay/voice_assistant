@@ -35,6 +35,7 @@ class NonBlockingLogManager:
         self.log_queue: queue.SimpleQueue = queue.SimpleQueue()
 
         self.stdout_handler = logging.StreamHandler(sys.stdout)
+        self.stdout_handler.setLevel(level)
         self.formatter = logging.Formatter(
             "[%(trace_id)s] [%(levelname)s] %(message)s"
         )

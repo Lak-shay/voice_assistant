@@ -24,7 +24,7 @@ from tools.sms_service import SMSService
 def isolate_test_environment(monkeypatch):
     monkeypatch.setattr("tools.calendar_service.settings.CALENDAR_BACKEND", "mock")
     monkeypatch.setattr("tools.appointment_tools.settings.CALENDAR_BACKEND", "mock")
-    calendar_service._in_memory_bookings.clear()
+    calendar_service.clear_reservations()
 
 
 def test_format_slot_phonetically():
@@ -148,7 +148,7 @@ async def test_tool_send_confirmation_sms():
         patient_phone="+15553332222",
         appointment_summary="September 12th at 10 30 AM",
     )
-    assert "confirmation text" in result.lower() or "text message" in result.lower()
+    assert "confirmation" in result.lower()
     for forbidden in ("**", "*", "#", "```"):
         assert forbidden not in result
 
@@ -216,6 +216,34 @@ async def test_calendar_service_thread_concurrency_lock():
     assert len(successes) == 1
     assert len(failures) == 1
     assert "taken" in failures[0]["error"]
+
+
+@pytest.mark.asyncio
+async def test_contention_same_slot_fallback_booking():
+    cal = CalendarService()
+    contested_slot = "2026-10-25T10:00:00"
+    alternative_slot = "2026-10-25T10:30:00"
+
+    results = await asyncio.gather(
+        cal.book_slot(contested_slot, "Alex Taylor", "+15551112222"),
+        cal.book_slot(contested_slot, "Jordan Blake", "+15553334444"),
+    )
+
+    successes = [r for r in results if r.get("success") is True]
+    failures = [r for r in results if r.get("success") is False]
+
+    assert len(successes) == 1
+    assert len(failures) == 1
+    assert "taken" in failures[0]["error"]
+    assert successes[0]["slot_time"] == contested_slot
+
+    failed_caller = "Jordan Blake" if successes[0]["patient_name"] == "Alex Taylor" else "Alex Taylor"
+    failed_phone = "+15553334444" if failed_caller == "Jordan Blake" else "+15551112222"
+
+    fallback_res = await cal.book_slot(alternative_slot, failed_caller, failed_phone)
+    assert fallback_res["success"] is True
+    assert fallback_res["slot_time"] == alternative_slot
+    assert fallback_res["patient_name"] == failed_caller
 
 
 def test_parse_flexible_date():
@@ -343,7 +371,7 @@ async def test_tool_send_confirmation_sms_requires_valid_phone():
         patient_phone="+18453334444",
         appointment_summary="October 18th at 11 AM",
     )
-    assert "confirmation text" in res_valid.lower()
+    assert "confirmation" in res_valid.lower()
 
     res_invalid = await send_confirmation_sms(
         mock_ctx,

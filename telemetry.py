@@ -90,26 +90,6 @@ class TelemetryManager:
             logger.warning("[%s] Failed to create Langfuse trace: %s", room_name, exc)
             return None
 
-    def start_span(self, trace_id: str, span_name: str, input_data: Any = None) -> Any | None:
-        trace = self._active_traces.get(trace_id)
-        if not trace:
-            return None
-        try:
-            return trace.start_observation(name=span_name, input=input_data)
-        except Exception as exc:
-            logger.warning("[%s] Error starting span %s: %s", trace_id, span_name, exc)
-            return None
-
-    def end_span(self, span: Any | None, output_data: Any = None) -> None:
-        if not span:
-            return
-        try:
-            if output_data is not None:
-                span.update(output=output_data)
-            span.end()
-        except Exception as exc:
-            logger.warning("Error ending span: %s", exc)
-
     async def flush(self, trace_id: str | None = None) -> None:
         if trace_id:
             trace = self._active_traces.pop(trace_id, None)

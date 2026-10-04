@@ -10,12 +10,12 @@ from logger import logger
 def sanitize_e164(phone: str, default_country_code: str = "+1") -> str | None:
     cleaned = re.sub(r"[^\d+]", "", phone.strip())
     if cleaned.startswith("+"):
-        digits_only = re.sub(r"\D", "", cleaned)
+        digits_only = cleaned[1:].replace("+", "")
         if 10 <= len(digits_only) <= 15:
             return f"+{digits_only}"
         return None
 
-    digits = re.sub(r"\D", "", cleaned)
+    digits = cleaned.replace("+", "")
     if len(digits) == 10:
         return f"{default_country_code}{digits}"
     if len(digits) == 11 and digits.startswith("1"):

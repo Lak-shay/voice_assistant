@@ -1,8 +1,8 @@
 from __future__ import annotations
 
 import datetime
-import re
 from typing import Annotated
+from dateutil import parser
 
 from livekit import rtc
 from livekit.agents import RunContext, function_tool
@@ -57,20 +57,19 @@ def format_slot_phonetically(slot_iso: str) -> str:
 
 
 def normalize_time_str(time_str: str) -> str | None:
+    if not time_str:
+        return None
     cleaned = time_str.strip().upper()
-    cleaned = re.sub(r"\s+", " ", cleaned)
     if cleaned.isdigit():
         h = int(cleaned)
         if 1 <= h <= 12:
             period = "AM" if 9 <= h <= 11 else "PM"
             cleaned = f"{h} {period}"
-    for fmt in ("%I:%M %p", "%I %p", "%H:%M:%S", "%H:%M", "%I:%M%p", "%I%p"):
-        try:
-            t = datetime.datetime.strptime(cleaned, fmt).time()
-            return f"{t.hour:02d}:{t.minute:02d}:00"
-        except ValueError:
-            continue
-    return None
+    try:
+        t = parser.parse(cleaned).time()
+        return f"{t.hour:02d}:{t.minute:02d}:00"
+    except (ValueError, OverflowError, parser.ParserError):
+        return None
 
 
 @function_tool()
@@ -86,7 +85,7 @@ async def check_availability(
     ] = None,
     preferred_period: Annotated[
         str | None,
-        Field(default=None, description="Optional period of the day: 'morning', 'afternoon', or 'evening'"),
+        Field(default=None, description="Optional period of the day: 'morning' (before 12 PM), 'afternoon' (12 PM to 4 PM), or 'evening' (4 PM and later, including late afternoon)"),
     ] = None,
 ) -> str:
     """Check open appointment slots for a given date, specific time, or time of day."""
@@ -203,15 +202,26 @@ async def book_appointment(
     context.disallow_interruptions()
 
     try:
+        clean_name = patient_name.strip()
+        if not clean_name or clean_name.lower() in ("anonymous", "unknown", "none", "n/a", "caller"):
+            return "A full patient name is required to complete the booking. Could you please provide your full name?"
+
         clean_phone = sanitize_e164(patient_phone)
         if not clean_phone:
             return "A valid phone number is required to complete the booking. Could you please provide your phone number?"
 
-        res = await calendar_service.book_slot(slot_time, patient_name, clean_phone)
+        res = await calendar_service.book_slot(slot_time, clean_name, clean_phone)
         if not res.get("success"):
             return str(res.get("error", "That slot is unavailable. Please choose another time."))
 
         booked_slot = res.get("slot_time", slot_time)
+        if hasattr(context, "userdata") and isinstance(context.userdata, dict):
+            context.userdata["last_booking"] = {
+                "patient_name": patient_name.strip(),
+                "patient_phone": clean_phone,
+                "slot_time": booked_slot,
+                "success": bool(res.get("success")),
+            }
         phonetic_time = format_slot_phonetically(booked_slot)
         return f"You are all set, {patient_name.strip()}. Your appointment is confirmed for {phonetic_time}."
     except Exception as exc:
@@ -240,7 +250,7 @@ async def send_confirmation_sms(
         message = f"Hello from {settings.CLINIC_NAME}. Your visit is confirmed for {appointment_summary}."
         res = await sms_service.send_confirmation(clean_phone, message)
         if res.get("success"):
-            return "I have sent a confirmation text message to your phone."
+            return "You will receive the confirmation message on your phone shortly."
         return "I booked your appointment, but our text service could not deliver the confirmation message."
     except Exception as exc:
         logger.warning("Error sending confirmation SMS: %s", exc)

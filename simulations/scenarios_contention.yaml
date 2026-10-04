@@ -1,0 +1,55 @@
+name: Simultaneous Same-Slot Contention Suite
+scenarios:
+  - label: Caller 1 - Alex Taylor (Demands Oct 25 at 10:00 AM)
+    instructions: |
+      PERSONA: Alex Taylor, decisive and direct.
+      OPENING LINE: "Hi, my name is Alex Taylor and I need an appointment on October 25th at 10:00 AM."
+      FACTS:
+      - Preferred date: October 25th
+      - Preferred slot: 10:00 AM
+      - Full name: Alex Taylor
+      - Caller ID: +15551234567
+      DO, IN ORDER:
+      1. State your name and demand the appointment for October 25th at 10:00 AM.
+      2. When the agent asks to confirm your appointment date and time, say "Yes, please confirm that."
+      3. If the agent confirms your 10:00 AM appointment, say "Thank you, goodbye" and end the call.
+      4. If the agent informs you that 10:00 AM was just taken and asks you to choose another slot, say "Please book 10:30 AM instead", confirm when asked, then say "Thank you, goodbye".
+    agent_expectations: |
+      The agent must check availability for October 25th at 10:00 AM, confirm the details with Alex Taylor,
+      and call book_appointment. If the slot was just taken by the concurrent caller, the agent must explain that
+      the slot was just taken, offer remaining open slots, and book the alternative slot.
+    tags:
+      feature: contention
+    userdata:
+      caller_phone: "+15551234567"
+      expected_booking:
+        patient_name: "Alex Taylor"
+        patient_phone: "+15551234567"
+        slot_date: "2026-10-25"
+
+  - label: Caller 2 - Morgan Smith (Demands Oct 25 at 10:00 AM)
+    instructions: |
+      PERSONA: Morgan Smith, decisive and direct.
+      OPENING LINE: "Hello, my name is Morgan Smith and I need an appointment on October 25th at 10:00 AM."
+      FACTS:
+      - Preferred date: October 25th
+      - Preferred slot: 10:00 AM
+      - Full name: Morgan Smith
+      - Caller ID: +15559876543
+      DO, IN ORDER:
+      1. State your name and demand the appointment for October 25th at 10:00 AM.
+      2. When the agent asks to confirm your appointment date and time, say "Yes, please confirm that."
+      3. If the agent confirms your 10:00 AM appointment, say "Thank you, goodbye" and end the call.
+      4. If the agent informs you that 10:00 AM was just taken and asks you to choose another slot, say "Please book 10:30 AM instead", confirm when asked, then say "Thank you, goodbye".
+    agent_expectations: |
+      Both callers compete for the 10:00 AM slot. When 10:00 AM is taken by the concurrent caller,
+      the agent must inform Morgan that 10:00 AM was just taken, offer alternative slots,
+      and successfully book Morgan Smith for the alternative slot (10:30 AM).
+    tags:
+      feature: contention
+    userdata:
+      caller_phone: "+15559876543"
+      expected_booking:
+        patient_name: "Morgan Smith"
+        patient_phone: "+15559876543"
+        slot_date: "2026-10-25"
