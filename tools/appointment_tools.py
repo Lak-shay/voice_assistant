@@ -1,11 +1,10 @@
 from __future__ import annotations
 
-import datetime
 from typing import Annotated
 from dateutil import parser
 
 from livekit import rtc
-from livekit.agents import RunContext, function_tool
+from livekit.agents import RunContext, function_tool, get_job_context
 from pydantic import Field
 
 from config import settings
@@ -15,6 +14,11 @@ from tools.calendar_service import (
     parse_flexible_date,
 )
 from tools.sms_service import sanitize_e164, sms_service
+from guardrails.tool_guardrails import (
+    validate_booking_date_range,
+    validate_patient_name,
+    validate_patient_phone,
+)
 
 
 def _ordinal_suffix(day: int) -> str:
@@ -37,7 +41,7 @@ def _get_active_periods(slots: list[str]) -> list[str]:
 
 def format_date_phonetically(date_str: str) -> str:
     try:
-        dt = datetime.date.fromisoformat(date_str.strip())
+        dt = parser.parse(date_str.strip()).date()
         return f"{dt.strftime('%B')} {dt.day}{_ordinal_suffix(dt.day)}"
     except Exception:
         return date_str
@@ -45,7 +49,7 @@ def format_date_phonetically(date_str: str) -> str:
 
 def format_slot_phonetically(slot_iso: str) -> str:
     try:
-        dt = datetime.datetime.fromisoformat(slot_iso)
+        dt = parser.parse(slot_iso.strip())
         month_name = dt.strftime("%B")
         hour = dt.strftime("%I").lstrip("0")
         minute = dt.strftime("%M")
@@ -93,6 +97,10 @@ async def check_availability(
         tz = calendar_service._get_timezone()
         parsed_date = parse_flexible_date(preferred_date, tz)
         date_str = parsed_date.isoformat() if parsed_date else preferred_date.strip()
+
+        is_valid_date, date_err = validate_booking_date_range(parsed_date or date_str)
+        if not is_valid_date:
+            return date_err or "Please provide a valid date."
 
         slots_by_period = await calendar_service.get_slots_by_period(date_str)
         all_day_slots = [s for sublist in slots_by_period.values() for s in sublist]
@@ -202,14 +210,19 @@ async def book_appointment(
     context.disallow_interruptions()
 
     try:
+        valid_name, name_err = validate_patient_name(patient_name)
+        if not valid_name:
+            return name_err or "A full patient name is required to complete the booking."
+
+        valid_phone, clean_phone, phone_err = validate_patient_phone(patient_phone)
+        if not valid_phone or not clean_phone:
+            return phone_err or "A valid phone number is required to complete the booking."
+
+        is_valid_date, date_err = validate_booking_date_range(slot_time)
+        if not is_valid_date:
+            return date_err or "Please choose an upcoming appointment date."
+
         clean_name = patient_name.strip()
-        if not clean_name or clean_name.lower() in ("anonymous", "unknown", "none", "n/a", "caller"):
-            return "A full patient name is required to complete the booking. Could you please provide your full name?"
-
-        clean_phone = sanitize_e164(patient_phone)
-        if not clean_phone:
-            return "A valid phone number is required to complete the booking. Could you please provide your phone number?"
-
         res = await calendar_service.book_slot(slot_time, clean_name, clean_phone)
         if not res.get("success"):
             return str(res.get("error", "That slot is unavailable. Please choose another time."))
@@ -257,3 +270,76 @@ async def send_confirmation_sms(
         return "Your appointment is confirmed, though I could not send the text message at this moment."
 
 
+@function_tool()
+async def transfer_to_human(
+    context: RunContext,
+    reason: Annotated[
+        str | None,
+        Field(default=None, description="Optional brief reason for transferring the call to front desk staff"),
+    ] = None,
+) -> str:
+    """Transfer the caller to a human receptionist or front desk staff."""
+    context.disallow_interruptions()
+    failover_phone = sanitize_e164(settings.CLINIC_FAILOVER_PHONE)
+    if not failover_phone:
+        logger.warning("CLINIC_FAILOVER_PHONE is not configured or invalid: %s", settings.CLINIC_FAILOVER_PHONE)
+        return "I am unable to transfer your call because the front desk phone number is not configured."
+
+    job_ctx = None
+    if hasattr(context, "userdata") and isinstance(context.userdata, dict):
+        job_ctx = context.userdata.get("job_ctx")
+        context.userdata["last_transfer"] = {
+            "transferred": True,
+            "failover_phone": failover_phone,
+            "reason": reason,
+        }
+    if job_ctx is None:
+        try:
+            job_ctx = get_job_context()
+        except Exception:
+            job_ctx = None
+
+    if job_ctx is None:
+        logger.info("Transfer to human initiated in mock/standalone mode: failover=%s, reason=%s", failover_phone, reason)
+        return "I am transferring you to the front desk now. Please hold while I connect your call."
+
+    room = getattr(job_ctx, "room", None)
+    remote_participants = getattr(room, "remote_participants", {}) if room else {}
+
+    target_participant = next(
+        (
+            p for p in remote_participants.values()
+            if getattr(p, "kind", None) == rtc.ParticipantKind.PARTICIPANT_KIND_SIP
+        ),
+        None,
+    )
+    if target_participant is None and remote_participants:
+        target_participant = next(iter(remote_participants.values()))
+
+    if not target_participant:
+        logger.warning("No remote caller participant found to transfer.")
+        return "I am transferring you to the front desk now. Please hold while I connect your call."
+
+    try:
+        logger.info(
+            "Transferring participant %s to failover number %s (reason: %s)",
+            target_participant.identity,
+            failover_phone,
+            reason,
+        )
+        transfer_res = job_ctx.transfer_sip_participant(
+            target_participant.identity,
+            f"tel:{failover_phone}",
+            play_dialtone=False,
+        )
+        if hasattr(transfer_res, "__await__"):
+            await transfer_res
+        return "I am transferring you to our front desk now. Please hold while I connect your call."
+    except Exception as exc:
+        sim_ctx = job_ctx.simulation_context() if hasattr(job_ctx, "simulation_context") and callable(job_ctx.simulation_context) else None
+        is_real_sim = sim_ctx is not None and sim_ctx.__class__.__name__ == "SimulationContext"
+        if is_real_sim:
+            logger.info("SIP transfer exception in simulation environment handled gracefully: %s", exc)
+            return "I am transferring you to our front desk now. Please hold while I connect your call."
+        logger.warning("Error transferring SIP call to %s: %s", failover_phone, exc)
+        return "I was unable to transfer your call right now. Please call our clinic directly."

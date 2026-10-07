@@ -78,6 +78,7 @@ The worker runs inside a Docker container (or local process) executing an asynch
 * **`check_availability`:** Queries open slots via Google Calendar API (`freebusy.query`), grouping openings into morning, afternoon, and evening periods.
 * **`book_appointment`:** Protected by an atomic multithreading mutex lock (`_write_lock`). Performs an on-calendar verification (`freebusy.query`) to ensure the slot was not taken, then creates the calendar event (`events().insert`) before confirming.
 * **`send_confirmation_sms`:** Dispatches post-booking confirmation SMS via Telnyx REST API (`/v2/messages`).
+* **`transfer_to_human`:** Initiates a cold SIP transfer via LiveKit (`job_ctx.transfer_sip_participant`) using SIP REFER to forward callers to the clinic's physical front desk (`CLINIC_FAILOVER_PHONE`).
 
 #### 5. Observability & Telemetry (Langfuse v4)
 

@@ -216,7 +216,7 @@ class CalendarService:
             if target_date is None:
                 return []
             time_min = datetime.datetime.combine(target_date, datetime.time(9, 0), tzinfo=tz).isoformat()
-            time_max = datetime.datetime.combine(target_date, datetime.time(17, 30), tzinfo=tz).isoformat()
+            time_max = datetime.datetime.combine(target_date, datetime.time(18, 0), tzinfo=tz).isoformat()
 
         cal_id = settings.CALENDAR_ID or "primary"
         body = {

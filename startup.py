@@ -3,7 +3,6 @@ from __future__ import annotations
 import asyncio
 import datetime
 import sys
-from typing import Optional, Tuple
 import aiohttp
 from langfuse import Langfuse
 from livekit.agents import inference
@@ -17,7 +16,7 @@ from tools.calendar_service import calendar_service
 
 async def check_livekit_connection(
     settings: Settings,
-) -> Tuple[bool, str]:
+) -> tuple[bool, str]:
     if not settings.LIVEKIT_URL or not settings.LIVEKIT_API_KEY or not settings.LIVEKIT_API_SECRET:
         return False, "Missing LIVEKIT_URL, LIVEKIT_API_KEY, or LIVEKIT_API_SECRET"
 
@@ -45,7 +44,7 @@ def _sync_langfuse_check(public_key: str, secret_key: str, host: str) -> bool:
 
 async def check_langfuse_connection(
     settings: Settings,
-) -> Tuple[bool, str]:
+) -> tuple[bool, str]:
     if not settings.LANGFUSE_PUBLIC_KEY or not settings.LANGFUSE_SECRET_KEY:
         return False, "Missing LANGFUSE_PUBLIC_KEY or LANGFUSE_SECRET_KEY"
 
@@ -71,7 +70,7 @@ async def check_langfuse_connection(
 
 async def check_model_configuration(
     settings: Settings,
-) -> Tuple[bool, str]:
+) -> tuple[bool, str]:
     required = {
         "STT_PROVIDER": settings.STT_PROVIDER,
         "STT_MODEL": settings.STT_MODEL,
@@ -114,7 +113,7 @@ async def check_model_configuration(
 
 async def check_telnyx_connection(
     settings: Settings,
-) -> Tuple[bool, str]:
+) -> tuple[bool, str]:
     if settings.SMS_BACKEND != "telnyx":
         return True, f"Telnyx verification skipped (SMS_BACKEND={settings.SMS_BACKEND})"
 
@@ -143,7 +142,7 @@ async def check_telnyx_connection(
 
 async def check_calendar_connection(
     settings: Settings,
-) -> Tuple[bool, str]:
+) -> tuple[bool, str]:
     if settings.CALENDAR_BACKEND != "google":
         return True, f"Calendar verification skipped (CALENDAR_BACKEND={settings.CALENDAR_BACKEND})"
 
@@ -170,7 +169,7 @@ async def check_calendar_connection(
 
 
 async def run_startup_checks(
-    custom_settings: Optional[Settings] = None,
+    custom_settings: Settings | None = None,
 ) -> bool:
     app_settings = custom_settings or default_settings
     logger.info(
@@ -197,7 +196,7 @@ async def run_startup_checks(
 
     if all_ok:
         logger.info(
-            "!!!!!!!!!!! Application startup readiness check passed (environment: %s) !!!!!!!!!!!!!!",
+            "Application startup readiness check passed (environment: %s)",
             app_settings.APP_ENV,
         )
         return True

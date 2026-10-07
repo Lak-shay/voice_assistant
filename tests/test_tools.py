@@ -3,13 +3,16 @@ import datetime
 from unittest.mock import AsyncMock, MagicMock
 from zoneinfo import ZoneInfo
 import pytest
+from livekit import rtc
 
 from tools.appointment_tools import (
     book_appointment,
     check_availability,
+    format_date_phonetically,
     format_slot_phonetically,
     get_sip_caller_phone,
     send_confirmation_sms,
+    transfer_to_human,
 )
 from tools.calendar_service import (
     CalendarService,
@@ -31,7 +34,10 @@ def test_format_slot_phonetically():
     assert "September 10th at 2 30 PM" == format_slot_phonetically("2026-09-10T14:30:00")
     assert "January 1st at 9 AM" == format_slot_phonetically("2026-01-01T09:00:00")
     assert "March 2nd at 11 15 AM" == format_slot_phonetically("2026-03-02T11:15:00")
+    assert "October 15th at 10 AM" == format_slot_phonetically("2026-10-15 10:00 AM")
     assert "invalid-date" == format_slot_phonetically("invalid-date")
+    assert "September 10th" == format_date_phonetically("2026-09-10")
+    assert "October 5th" == format_date_phonetically("October 5th, 2026")
 
 
 @pytest.mark.asyncio
@@ -381,3 +387,56 @@ async def test_tool_send_confirmation_sms_requires_valid_phone():
     assert "valid phone number is required" in res_invalid.lower()
 
 
+@pytest.mark.asyncio
+async def test_tool_transfer_to_human_success():
+    mock_run_ctx = MagicMock()
+    mock_job_ctx = MagicMock()
+    mock_job_ctx.transfer_sip_participant = AsyncMock(return_value=None)
+
+    mock_participant = MagicMock()
+    mock_participant.identity = "sip_caller_test"
+    mock_participant.kind = rtc.ParticipantKind.PARTICIPANT_KIND_STANDARD
+    mock_job_ctx.room.remote_participants = {"p1": mock_participant}
+
+    mock_run_ctx.userdata = {"job_ctx": mock_job_ctx}
+
+    res = await transfer_to_human(mock_run_ctx, reason="caller requested real person")
+    mock_run_ctx.disallow_interruptions.assert_called_once()
+    mock_job_ctx.transfer_sip_participant.assert_called_once_with(
+        "sip_caller_test",
+        "tel:+15551234567",
+        play_dialtone=False,
+    )
+    assert "transferring you" in res.lower()
+
+
+@pytest.mark.asyncio
+async def test_tool_transfer_to_human_missing_config(monkeypatch):
+    monkeypatch.setattr("tools.appointment_tools.settings.CLINIC_FAILOVER_PHONE", "")
+    mock_run_ctx = MagicMock()
+    res = await transfer_to_human(mock_run_ctx)
+    assert "not configured" in res.lower()
+
+
+@pytest.mark.asyncio
+async def test_tool_transfer_to_human_handles_sip_error():
+    mock_run_ctx = MagicMock()
+    mock_job_ctx = MagicMock()
+    mock_job_ctx.transfer_sip_participant = AsyncMock(side_effect=RuntimeError("SIP 486 Busy Here"))
+
+    mock_participant = MagicMock()
+    mock_participant.identity = "sip_caller_test"
+    mock_job_ctx.room.remote_participants = {"p1": mock_participant}
+
+    mock_run_ctx.userdata = {"job_ctx": mock_job_ctx}
+
+    res = await transfer_to_human(mock_run_ctx)
+    assert "unable to transfer" in res.lower()
+
+
+@pytest.mark.asyncio
+async def test_tool_transfer_to_human_standalone_mode():
+    mock_run_ctx = MagicMock()
+    mock_run_ctx.userdata = {}
+    res = await transfer_to_human(mock_run_ctx)
+    assert "transferring you" in res.lower()

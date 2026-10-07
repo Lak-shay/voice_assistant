@@ -62,6 +62,13 @@ class Settings(BaseSettings):
     STARTUP_CHECK_TIMEOUT: float
     NUM_IDLE_PROCESSES: int = 10
 
+    # Guardrails Configuration
+    GUARDRAILS_ENABLED: bool = True
+    GUARDRAILS_MAX_BOOKING_DAYS_AHEAD: int = 60
+    GUARDRAILS_EMERGENCY_TRIAGE_ENABLED: bool = True
+    GUARDRAILS_INJECTION_DEFENSE_ENABLED: bool = True
+    GUARDRAILS_TTS_SANITIZER_ENABLED: bool = True
+
     model_config = SettingsConfigDict(
         env_file=get_active_env_file(),
         env_file_encoding="utf-8",

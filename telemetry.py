@@ -60,23 +60,24 @@ class TelemetryManager:
                 )
             self._active_traces[room_name] = trace
 
-            if self._trace_provider is None and settings.LANGFUSE_PUBLIC_KEY and settings.LANGFUSE_SECRET_KEY:
+            if settings.LANGFUSE_PUBLIC_KEY and settings.LANGFUSE_SECRET_KEY:
                 try:
-                    auth = base64.b64encode(f"{settings.LANGFUSE_PUBLIC_KEY}:{settings.LANGFUSE_SECRET_KEY}".encode()).decode()
-                    base_url = settings.LANGFUSE_BASE_URL.rstrip("/")
-                    endpoint = f"{base_url}/api/public/otel/v1/traces"
-                    headers = {
-                        "Authorization": f"Basic {auth}",
-                        "x-langfuse-ingestion-version": "4",
-                    }
+                    if self._trace_provider is None:
+                        auth = base64.b64encode(f"{settings.LANGFUSE_PUBLIC_KEY}:{settings.LANGFUSE_SECRET_KEY}".encode()).decode()
+                        base_url = settings.LANGFUSE_BASE_URL.rstrip("/")
+                        endpoint = f"{base_url}/api/public/otel/v1/traces"
+                        headers = {
+                            "Authorization": f"Basic {auth}",
+                            "x-langfuse-ingestion-version": "4",
+                        }
 
-                    provider = TracerProvider()
-                    exporter = OTLPSpanExporter(endpoint=endpoint, headers=headers)
-                    provider.add_span_processor(BatchSpanProcessor(exporter))
-                    self._trace_provider = provider
+                        provider = TracerProvider()
+                        exporter = OTLPSpanExporter(endpoint=endpoint, headers=headers)
+                        provider.add_span_processor(BatchSpanProcessor(exporter))
+                        self._trace_provider = provider
 
                     set_tracer_provider(
-                        provider,
+                        self._trace_provider,
                         metadata={
                             "langfuse.session.id": room_name,
                             "langfuse.environment": settings.APP_ENV,
@@ -114,6 +115,19 @@ class TelemetryManager:
             await asyncio.to_thread(client.flush)
         except Exception as exc:
             logger.warning("Langfuse telemetry flush error: %s", exc)
+
+    def record_guardrail_event(self, trace_id: str, event_type: str, details: dict[str, Any] | None = None) -> None:
+        client = self.get_client()
+        if not client:
+            return
+        try:
+            client.score(
+                name="guardrail_intervention",
+                value=1.0,
+                comment=f"{event_type}: {details or {}}",
+            )
+        except Exception as exc:
+            logger.debug("[%s] Telemetry guardrail score notice: %s", trace_id, exc)
 
 
 telemetry = TelemetryManager()
