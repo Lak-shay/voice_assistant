@@ -1,9 +1,11 @@
 import asyncio
 import base64
+import os
 from typing import Any
 
 from langfuse import Langfuse, propagate_attributes
 from opentelemetry.exporter.otlp.proto.http.trace_exporter import OTLPSpanExporter
+from opentelemetry.sdk.resources import Resource
 from opentelemetry.sdk.trace import TracerProvider
 from opentelemetry.sdk.trace.export import BatchSpanProcessor
 
@@ -33,7 +35,11 @@ class TelemetryManager:
                 self._client = None
         return self._client
 
-    def create_session_trace(self, room_name: str, participant_id: str | None = None) -> Any | None:
+    def create_session_trace(
+        self,
+        room_name: str,
+        participant_id: str | None = None,
+    ) -> Any | None:
         client = self.get_client()
         if not client:
             return None
@@ -71,7 +77,13 @@ class TelemetryManager:
                             "x-langfuse-ingestion-version": "4",
                         }
 
-                        provider = TracerProvider()
+                        resource = Resource.create({
+                            "deployment.environment": settings.APP_ENV,
+                            "deployment.environment.name": settings.APP_ENV,
+                            "langfuse.environment": settings.APP_ENV,
+                            "service.name": "clinic-receptionist",
+                        })
+                        provider = TracerProvider(resource=resource)
                         exporter = OTLPSpanExporter(endpoint=endpoint, headers=headers)
                         provider.add_span_processor(BatchSpanProcessor(exporter))
                         self._trace_provider = provider
@@ -81,6 +93,7 @@ class TelemetryManager:
                         metadata={
                             "langfuse.session.id": room_name,
                             "langfuse.environment": settings.APP_ENV,
+                            "deployment.environment": settings.APP_ENV,
                         },
                     )
                 except Exception as otel_exc:

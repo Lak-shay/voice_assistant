@@ -81,7 +81,7 @@ async def check_availability(
     context: RunContext,
     preferred_date: Annotated[
         str,
-        Field(description="Date for the appointment in YYYY-MM-DD format (or relative day like 'today', 'tomorrow', 'Monday')"),
+        Field(description="Date or relative phrase for the appointment (e.g. 'next Thursday', 'tomorrow', 'this Friday', 'next Monday', or YYYY-MM-DD). Pass relative phrases directly."),
     ],
     preferred_time: Annotated[
         str | None,
@@ -105,7 +105,9 @@ async def check_availability(
         slots_by_period = await calendar_service.get_slots_by_period(date_str)
         all_day_slots = [s for sublist in slots_by_period.values() for s in sublist]
         available_periods = [p for p in ("morning", "afternoon", "evening") if slots_by_period.get(p)]
-        phonetic_date = format_date_phonetically(date_str)
+        dt_val = parsed_date or parser.parse(date_str).date()
+        weekday_name = dt_val.strftime("%A")
+        phonetic_date = f"{weekday_name}, {format_date_phonetically(date_str)}"
 
         if preferred_time:
             norm_time = normalize_time_str(preferred_time)

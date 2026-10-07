@@ -70,6 +70,32 @@ async def test_entrypoint_orchestration():
 
 
 @pytest.mark.asyncio
+async def test_entrypoint_orchestration_with_room_sid():
+    mock_ctx = MagicMock()
+    mock_ctx.room.name = "sim-SRJ_test_12345"
+    mock_ctx.room.sid = "RM_server_room_sid"
+    mock_ctx.connect = AsyncMock()
+    mock_ctx.add_shutdown_callback = MagicMock()
+
+    mock_session = MagicMock()
+    mock_session.start = AsyncMock()
+
+    with patch("agent.telemetry.create_session_trace") as mock_trace, \
+         patch("agent.AgentSession", return_value=mock_session), \
+         patch("agent.silero.VAD.load", return_value=MagicMock()), \
+         patch("agent.inference.STT", return_value=MagicMock()), \
+         patch("agent.inference.TTS", return_value=MagicMock()), \
+         patch("agent.inference.LLM", return_value=MagicMock()):
+
+        await entrypoint(mock_ctx)
+
+        mock_ctx.connect.assert_awaited_once()
+        mock_trace.assert_called_once_with("RM_server_room_sid")
+        mock_ctx.add_shutdown_callback.assert_called_once()
+        mock_session.start.assert_awaited_once()
+
+
+@pytest.mark.asyncio
 async def test_on_user_turn_completed_emergency_blocks_llm():
     agent = ClinicReceptionistAgent()
     mock_session = MagicMock()
