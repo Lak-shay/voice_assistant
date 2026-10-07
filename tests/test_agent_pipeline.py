@@ -19,6 +19,8 @@ def test_clinic_agent_instructions_constraints():
     assert "No phone number was received from caller ID" in instructions
     assert "read back their phone number in spoken digits" in instructions
     assert "confirm the appointment date and time before booking" in instructions
+    assert "proactive notifications and waitlists are unavailable" in instructions
+    assert "closest slot" in instructions
 
 
 def test_clinic_agent_instructions_with_caller_phone():
