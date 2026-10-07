@@ -40,6 +40,21 @@ $lkPath = if (Test-Path "$rootDir\.venv\Scripts\lk.exe") {
     "lk"
 }
 
+# Resolve python path and clean existing test appointments
+$pythonPath = if (Test-Path "$rootDir\.venv\Scripts\python.exe") {
+    "$rootDir\.venv\Scripts\python.exe"
+} elseif (Test-Path ".\.venv\Scripts\python.exe") {
+    ".\.venv\Scripts\python.exe"
+} else {
+    "python"
+}
+
+$cleanScript = Join-Path $rootDir "simulations\clean_calendar.py"
+if (Test-Path $cleanScript) {
+    Write-Host "Resetting test reservations..." -ForegroundColor DarkYellow
+    & $pythonPath $cleanScript
+}
+
 $agentPath = if (Test-Path "agent.py") { "agent.py" } else { Join-Path $rootDir "agent.py" }
 
 Write-Host "Running LiveKit AI Caller Simulation ($Mode mode, Concurrency: $Concurrency, Scenarios: $scenarioPath)..." -ForegroundColor Cyan

@@ -25,12 +25,17 @@ except ImportError:
     GOOGLE_CLIENT_AVAILABLE = False
 
 
-def parse_flexible_date(date_str: str, clinic_tz: datetime.tzinfo) -> datetime.date | None:
+def parse_flexible_date(
+    date_str: str,
+    clinic_tz: datetime.tzinfo,
+    base_date: datetime.date | None = None,
+) -> datetime.date | None:
     """Robustly parse natural language, relative, or formatted date strings into a date object."""
     if not date_str:
         return None
     raw = date_str.strip().lower()
-    base_date = datetime.datetime.now(clinic_tz).date()
+    if base_date is None:
+        base_date = datetime.datetime.now(clinic_tz).date()
 
     if raw in ("today", "now"):
         return base_date
@@ -43,11 +48,14 @@ def parse_flexible_date(date_str: str, clinic_tz: datetime.tzinfo) -> datetime.d
         "monday": 0, "tuesday": 1, "wednesday": 2, "thursday": 3,
         "friday": 4, "saturday": 5, "sunday": 6,
     }
+    is_next = "next" in raw
     for day_name, day_num in weekdays.items():
         if day_name in raw:
             days_ahead = (day_num - base_date.weekday()) % 7
             if days_ahead == 0:
                 days_ahead = 7
+            elif is_next and day_num > base_date.weekday():
+                days_ahead += 7
             return base_date + datetime.timedelta(days=days_ahead)
 
     try:
@@ -74,10 +82,14 @@ def parse_flexible_slot(
     if default_date is None:
         default_date = datetime.datetime.now(clinic_tz).date()
 
-    # If slot string specifies a relative day (e.g. 'tomorrow at 10 AM', 'Monday at 2 PM')
-    rel_match = re.search(r"\b(today|tomorrow|yesterday|monday|tuesday|wednesday|thursday|friday|saturday|sunday)\b", raw, re.I)
+    # If slot string specifies a relative day (e.g. 'tomorrow at 10 AM', 'Monday at 2 PM', 'next Thursday at 10 AM')
+    rel_match = re.search(
+        r"\b(today|tomorrow|yesterday|(?:next\s+)?(?:monday|tuesday|wednesday|thursday|friday|saturday|sunday))\b",
+        raw,
+        re.I,
+    )
     if rel_match:
-        rel_date = parse_flexible_date(rel_match.group(1), clinic_tz)
+        rel_date = parse_flexible_date(rel_match.group(1), clinic_tz, base_date=default_date)
         if rel_date:
             default_date = rel_date
 

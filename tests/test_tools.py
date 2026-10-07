@@ -264,6 +264,20 @@ def test_parse_flexible_date():
     assert parse_flexible_date("10/05/2026", tz) == datetime.date(2026, 10, 5)
     assert parse_flexible_date("invalid-nonsense", tz) is None
 
+    # Generic weekday and 'next <weekday>' parsing across all 7 days
+    weekdays = {
+        "monday": 0, "tuesday": 1, "wednesday": 2, "thursday": 3,
+        "friday": 4, "saturday": 5, "sunday": 6,
+    }
+    for day_name, day_num in weekdays.items():
+        days_ahead = (day_num - base.weekday()) % 7
+        if days_ahead == 0:
+            days_ahead = 7
+        assert parse_flexible_date(day_name, tz, base_date=base) == base + datetime.timedelta(days=days_ahead)
+
+        next_days = days_ahead + (7 if day_num > base.weekday() else 0)
+        assert parse_flexible_date(f"next {day_name}", tz, base_date=base) == base + datetime.timedelta(days=next_days)
+
 
 def test_parse_flexible_slot():
     tz = ZoneInfo("America/New_York")
@@ -282,6 +296,21 @@ def test_parse_flexible_slot():
     assert res4 == datetime.datetime(2026, 10, 5, 10, 0, tzinfo=tz)
 
     assert parse_flexible_slot("not-a-valid-time", tz) is None
+
+    # Generic slot parsing for 'next <weekday>' across all 7 days
+    weekdays = {
+        "monday": 0, "tuesday": 1, "wednesday": 2, "thursday": 3,
+        "friday": 4, "saturday": 5, "sunday": 6,
+    }
+    for day_name, day_num in weekdays.items():
+        days_ahead = (day_num - base.weekday()) % 7
+        if days_ahead == 0:
+            days_ahead = 7
+        if day_num > base.weekday():
+            days_ahead += 7
+        expected_dt = datetime.datetime.combine(base + datetime.timedelta(days=days_ahead), datetime.time(10, 0), tzinfo=tz)
+        assert parse_flexible_slot(f"next {day_name} at 10 AM", tz, default_date=base) == expected_dt
+
 
 
 @pytest.mark.asyncio
