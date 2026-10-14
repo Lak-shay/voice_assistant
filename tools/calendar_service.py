@@ -328,6 +328,58 @@ class CalendarService:
                 nearby.append((next_date_str, slots))
         return nearby
 
+    def _rollback_slot(self, normalized_slot: str) -> None:
+        try:
+            with sqlite3.connect(self._db_path, timeout=10.0) as conn:
+                conn.execute("DELETE FROM booked_slots WHERE slot_time = ?", (normalized_slot,))
+                conn.commit()
+        except Exception as exc:
+            logger.error("Failed to rollback slot reservation %s: %s", normalized_slot, exc)
+
+    def _sync_google_book(
+        self,
+        normalized_slot: str,
+        patient_name: str,
+        patient_phone: str,
+        slot_dt: datetime.datetime,
+        slot_end: datetime.datetime,
+    ) -> dict[str, Any]:
+        cal_id = settings.CALENDAR_ID or "primary"
+        time_min = slot_dt.isoformat()
+        time_max = slot_end.isoformat()
+
+        try:
+            busy_list = self._sync_query_google_busy(time_min=time_min, time_max=time_max)
+            if any(slot_dt < b_end and slot_end > b_start for b_start, b_end in busy_list):
+                self._rollback_slot(normalized_slot)
+                return {"success": False, "error": "This slot was just taken. Please select another open time."}
+
+            event_body = {
+                "summary": f"Appointment: {patient_name.strip()}",
+                "description": f"Booked via Voice Receptionist for {patient_name.strip()}. Contact: {patient_phone.strip()}",
+                "start": {"dateTime": time_min, "timeZone": settings.CLINIC_TIMEZONE},
+                "end": {"dateTime": time_max, "timeZone": settings.CLINIC_TIMEZONE},
+            }
+            created_event = self._get_google_service().events().insert(calendarId=cal_id, body=event_body).execute()
+            event_id = created_event.get("id")
+            with sqlite3.connect(self._db_path, timeout=10.0) as conn:
+                conn.execute("UPDATE booked_slots SET event_id = ? WHERE slot_time = ?", (event_id, normalized_slot))
+                conn.commit()
+
+            self._in_memory_bookings.add(normalized_slot)
+            return {
+                "success": True,
+                "slot_time": normalized_slot,
+                "event_id": event_id,
+                "patient_name": patient_name.strip(),
+                "patient_phone": patient_phone.strip(),
+                "clinic_name": settings.CLINIC_NAME,
+            }
+        except Exception as exc:
+            logger.error("Google Calendar booking error: %s", exc)
+            self._rollback_slot(normalized_slot)
+            return {"success": False, "error": "A temporary booking error occurred. Please try again."}
+
     def _sync_check_and_book_slot(
         self,
         normalized_slot: str,
@@ -351,75 +403,12 @@ class CalendarService:
                     )
                     conn.commit()
             except sqlite3.IntegrityError:
-                return {
-                    "success": False,
-                    "error": "This slot was just taken. Please select another open time.",
-                }
+                return {"success": False, "error": "This slot was just taken. Please select another open time."}
             except Exception as db_exc:
                 logger.error("Failed to insert slot reservation in DB: %s", db_exc)
 
-            service = self._get_google_service()
-            if service:
-                cal_id = settings.CALENDAR_ID or "primary"
-                time_min = slot_dt.isoformat()
-                time_max = slot_end.isoformat()
-
-                try:
-                    busy_list = self._sync_query_google_busy(time_min=time_min, time_max=time_max)
-                    if any(slot_dt < b_end and slot_end > b_start for b_start, b_end in busy_list):
-                        with sqlite3.connect(self._db_path, timeout=10.0) as conn:
-                            conn.execute("DELETE FROM booked_slots WHERE slot_time = ?", (normalized_slot,))
-                            conn.commit()
-                        return {
-                            "success": False,
-                            "error": "This slot was just taken. Please select another open time.",
-                        }
-
-                    event_body = {
-                        "summary": f"Appointment: {patient_name.strip()}",
-                        "description": f"Booked via Voice Receptionist for {patient_name.strip()}. Contact: {patient_phone.strip()}",
-                        "start": {
-                            "dateTime": time_min,
-                            "timeZone": settings.CLINIC_TIMEZONE,
-                        },
-                        "end": {
-                            "dateTime": time_max,
-                            "timeZone": settings.CLINIC_TIMEZONE,
-                        },
-                    }
-                    created_event = service.events().insert(calendarId=cal_id, body=event_body).execute()
-                    event_id = created_event.get("id")
-                    with sqlite3.connect(self._db_path, timeout=10.0) as conn:
-                        conn.execute("UPDATE booked_slots SET event_id = ? WHERE slot_time = ?", (event_id, normalized_slot))
-                        conn.commit()
-
-                    self._in_memory_bookings.add(normalized_slot)
-                    return {
-                        "success": True,
-                        "slot_time": normalized_slot,
-                        "event_id": event_id,
-                        "patient_name": patient_name.strip(),
-                        "patient_phone": patient_phone.strip(),
-                        "clinic_name": settings.CLINIC_NAME,
-                    }
-                except HttpError as http_err:
-                    logger.error("Google Calendar API HttpError: %s", http_err)
-                    with sqlite3.connect(self._db_path, timeout=10.0) as conn:
-                        conn.execute("DELETE FROM booked_slots WHERE slot_time = ?", (normalized_slot,))
-                        conn.commit()
-                    return {
-                        "success": False,
-                        "error": "A temporary calendar error occurred. Please try again.",
-                    }
-                except Exception as exc:
-                    logger.error("Unexpected error during Google Calendar booking: %s", exc)
-                    with sqlite3.connect(self._db_path, timeout=10.0) as conn:
-                        conn.execute("DELETE FROM booked_slots WHERE slot_time = ?", (normalized_slot,))
-                        conn.commit()
-                    return {
-                        "success": False,
-                        "error": "A temporary booking error occurred. Please try again.",
-                    }
+            if self._get_google_service():
+                return self._sync_google_book(normalized_slot, patient_name, patient_phone, slot_dt, slot_end)
 
             self._in_memory_bookings.add(normalized_slot)
             return {

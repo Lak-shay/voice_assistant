@@ -196,7 +196,7 @@ async def run_startup_checks(
 
     if all_ok:
         logger.info(
-            "Application startup readiness check passed (environment: %s)",
+            "!!!!!!!!!!! Application startup readiness check passed (environment: %s) !!!!!!!!!!!!!!",
             app_settings.APP_ENV,
         )
         return True

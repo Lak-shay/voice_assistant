@@ -1,6 +1,5 @@
 import asyncio
 import base64
-import os
 from typing import Any
 
 from langfuse import Langfuse, propagate_attributes

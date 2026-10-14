@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import re
 from typing import Annotated
+
 from dateutil import parser
 
 from livekit import rtc
@@ -76,6 +78,74 @@ def normalize_time_str(time_str: str) -> str | None:
         return None
 
 
+async def _respond_to_time_request(
+    preferred_time: str,
+    date_str: str,
+    all_day_slots: list[str],
+    available_periods: list[str],
+    phonetic_date: str,
+) -> str:
+    norm_time = normalize_time_str(preferred_time)
+    if norm_time:
+        target_slot = f"{date_str}T{norm_time}"
+        if target_slot in all_day_slots:
+            return f"{format_slot_phonetically(target_slot)} is open. Would you like me to book that for you?"
+
+    if not available_periods:
+        nearby = await calendar_service.find_nearby_available_slots(date_str)
+        if nearby:
+            next_date, next_slots = nearby[0]
+            next_date_phonetic = format_date_phonetically(next_date)
+            next_periods = _get_active_periods(next_slots)
+            return (
+                f"We are fully booked on {phonetic_date}. The closest openings around that time are on "
+                f"{next_date_phonetic} in the {' and '.join(next_periods)}. Would you like to check that day?"
+            )
+        return f"I could not find any open slots around {phonetic_date} for {settings.CLINIC_NAME}. Would you like to check another week?"
+
+    if len(available_periods) == 1:
+        period_name = available_periods[0]
+        return f"That exact time is unavailable on {phonetic_date}, but we have openings in the {period_name}. Would you like {period_name}?"
+    if len(available_periods) == 2:
+        return (
+            f"That exact time is unavailable on {phonetic_date}, but we have openings in the "
+            f"{available_periods[0]} and {available_periods[1]}. Would you prefer {available_periods[0]} or {available_periods[1]}?"
+        )
+    return f"That exact time is unavailable on {phonetic_date}, but we have openings in the morning, afternoon, and evening. Which period works best for you?"
+
+
+async def _respond_no_preference(
+    date_str: str,
+    slots_by_period: dict[str, list[str]],
+    available_periods: list[str],
+    phonetic_date: str,
+) -> str:
+    if not available_periods:
+        nearby = await calendar_service.find_nearby_available_slots(date_str)
+        if nearby:
+            next_date, next_slots = nearby[0]
+            next_date_phonetic = format_date_phonetically(next_date)
+            next_periods = _get_active_periods(next_slots)
+            return (
+                f"I could not find any open slots on that date for {settings.CLINIC_NAME}. The closest openings are on "
+                f"{next_date_phonetic} in the {' and '.join(next_periods)}. Would you like to check that day?"
+            )
+        return f"I could not find any open slots on that date for {settings.CLINIC_NAME}. Would you like to check another day?"
+
+    if len(available_periods) == 1:
+        period_name = available_periods[0]
+        spoken = [format_slot_phonetically(s) for s in slots_by_period[period_name][:3]]
+        return _format_spoken_slot_choices(spoken)
+
+    if len(available_periods) == 2:
+        return (
+            f"On {phonetic_date}, we have openings in the {available_periods[0]} and {available_periods[1]}. "
+            f"Would you prefer {available_periods[0]} or {available_periods[1]}?"
+        )
+
+    return f"On {phonetic_date}, we have openings in the morning, afternoon, and evening. Which period do you prefer?"
+
+
 @function_tool()
 async def check_availability(
     context: RunContext,
@@ -106,31 +176,12 @@ async def check_availability(
         all_day_slots = [s for sublist in slots_by_period.values() for s in sublist]
         available_periods = [p for p in ("morning", "afternoon", "evening") if slots_by_period.get(p)]
         dt_val = parsed_date or parser.parse(date_str).date()
-        weekday_name = dt_val.strftime("%A")
-        phonetic_date = f"{weekday_name}, {format_date_phonetically(date_str)}"
+        phonetic_date = f"{dt_val.strftime('%A')}, {format_date_phonetically(date_str)}"
 
         if preferred_time:
-            norm_time = normalize_time_str(preferred_time)
-            if norm_time:
-                target_slot = f"{date_str}T{norm_time}"
-                if target_slot in all_day_slots:
-                    return f"{format_slot_phonetically(target_slot)} is open. Would you like me to book that for you?"
-
-            if available_periods:
-                if len(available_periods) == 1:
-                    period_name = available_periods[0]
-                    return f"That exact time is unavailable on {phonetic_date}, but we have openings in the {period_name}. Would you like {period_name}?"
-                if len(available_periods) == 2:
-                    return f"That exact time is unavailable on {phonetic_date}, but we have openings in the {available_periods[0]} and {available_periods[1]}. Would you prefer {available_periods[0]} or {available_periods[1]}?"
-                return f"That exact time is unavailable on {phonetic_date}, but we have openings in the morning, afternoon, and evening. Which period works best for you?"
-
-            nearby = await calendar_service.find_nearby_available_slots(date_str)
-            if nearby:
-                next_date, next_slots = nearby[0]
-                next_date_phonetic = format_date_phonetically(next_date)
-                next_periods = _get_active_periods(next_slots)
-                return f"We are fully booked on {phonetic_date}. The closest openings around that time are on {next_date_phonetic} in the {' and '.join(next_periods)}. Would you like to check that day?"
-            return f"I could not find any open slots around {phonetic_date} for {settings.CLINIC_NAME}. Would you like to check another week?"
+            return await _respond_to_time_request(
+                preferred_time, date_str, all_day_slots, available_periods, phonetic_date,
+            )
 
         if preferred_period:
             period_key = preferred_period.lower().strip()
@@ -138,29 +189,10 @@ async def check_availability(
             if period_slots:
                 spoken = [format_slot_phonetically(s) for s in period_slots[:3]]
                 return _format_spoken_slot_choices(spoken, prefix=f"In the {period_key} on {phonetic_date}, we have ")
-
             if available_periods:
                 return f"We have no {period_key} openings on {phonetic_date}, but we have slots in the {' and '.join(available_periods)}. Would either of those work for you?"
 
-        if not available_periods:
-            nearby = await calendar_service.find_nearby_available_slots(date_str)
-            if nearby:
-                next_date, next_slots = nearby[0]
-                next_date_phonetic = format_date_phonetically(next_date)
-                next_periods = _get_active_periods(next_slots)
-                return f"I could not find any open slots on that date for {settings.CLINIC_NAME}. The closest openings are on {next_date_phonetic} in the {' and '.join(next_periods)}. Would you like to check that day?"
-            return f"I could not find any open slots on that date for {settings.CLINIC_NAME}. Would you like to check another day?"
-
-        if len(available_periods) == 1:
-            period_name = available_periods[0]
-            spoken = [format_slot_phonetically(s) for s in slots_by_period[period_name][:3]]
-            return _format_spoken_slot_choices(spoken)
-
-        if len(available_periods) == 2:
-            return f"On {phonetic_date}, we have openings in the {available_periods[0]} and {available_periods[1]}. Would you prefer {available_periods[0]} or {available_periods[1]}?"
-
-        return f"On {phonetic_date}, we have openings in the morning, afternoon, and evening. Which period do you prefer?"
-
+        return await _respond_no_preference(date_str, slots_by_period, available_periods, phonetic_date)
     except Exception as exc:
         logger.warning("Error checking availability: %s", exc)
         return "I had trouble checking the schedule just now. Could you please repeat your preferred date?"
@@ -169,37 +201,33 @@ async def check_availability(
 def get_sip_caller_phone(room: rtc.Room | None = None, participant: rtc.Participant | None = None) -> str | None:
     """Extract E.164 phone number from SIP participant attributes, identity, or room name."""
     candidates: list[str] = []
+    seen_ids: set[int] = set()
 
-    # 1. Inspect explicitly passed participant
-    if participant is not None:
-        attrs = getattr(participant, "attributes", {}) or {}
+    def _extract_from_participant(p: rtc.Participant) -> None:
+        obj_id = id(p)
+        if obj_id in seen_ids:
+            return
+        seen_ids.add(obj_id)
+        attrs = getattr(p, "attributes", {}) or {}
         if isinstance(attrs, dict) and attrs.get("sip.phoneNumber"):
             candidates.append(attrs["sip.phoneNumber"])
-        identity = getattr(participant, "identity", None)
+        identity = getattr(p, "identity", None)
         if isinstance(identity, str):
             if identity.startswith("sip_"):
                 candidates.append(identity.removeprefix("sip_"))
             elif not identity.startswith("playground_") and not identity.startswith("agent_"):
                 candidates.append(identity)
 
-    # 2. Inspect all remote participants in room
+    if participant is not None:
+        _extract_from_participant(participant)
+
     if room and hasattr(room, "remote_participants") and isinstance(room.remote_participants, dict):
         for p in room.remote_participants.values():
-            attrs = getattr(p, "attributes", {}) or {}
-            if isinstance(attrs, dict) and attrs.get("sip.phoneNumber"):
-                candidates.append(attrs["sip.phoneNumber"])
-            identity = getattr(p, "identity", None)
-            if isinstance(identity, str):
-                if identity.startswith("sip_"):
-                    candidates.append(identity.removeprefix("sip_"))
-                elif not identity.startswith("playground_") and not identity.startswith("agent_"):
-                    candidates.append(identity)
+            _extract_from_participant(p)
 
-    # 3. Fallback: inspect room name pattern (e.g. call-_+18455554321_Xw6qGY5M6nCd)
     if room and hasattr(room, "name"):
         raw_name = getattr(room, "name", None)
         if isinstance(raw_name, str):
-            import re
             match = re.search(r"(\+?\d{10,15})", raw_name)
             if match:
                 candidates.append(match.group(1))

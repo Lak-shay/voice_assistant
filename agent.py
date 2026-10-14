@@ -131,18 +131,20 @@ server = AgentServer(
 
 async def on_simulation_end(ctx: SimulationContext) -> None:
     session = getattr(ctx.job_context, "primary_session", None)
-    userdata = getattr(session, "userdata", {}) if session else {}
+    userdata = getattr(session, "userdata", None)
+    if not isinstance(userdata, dict):
+        userdata = {}
 
     expected_transfer = ctx.userdata().get("expected_transfer")
     if expected_transfer:
-        last_transfer = userdata.get("last_transfer") if isinstance(userdata, dict) else None
+        last_transfer = userdata.get("last_transfer")
         if not last_transfer or not last_transfer.get("transferred"):
             ctx.fail(reason="Expected call transfer to human, but transfer_to_human was not executed.")
             return
 
     expected_guardrail = ctx.userdata().get("expected_guardrail")
     if expected_guardrail:
-        last_guardrail = userdata.get("last_guardrail") if isinstance(userdata, dict) else None
+        last_guardrail = userdata.get("last_guardrail")
         if not last_guardrail or expected_guardrail not in str(last_guardrail):
             ctx.fail(
                 reason=f"Expected guardrail intervention '{expected_guardrail}', but got '{last_guardrail}'"
@@ -153,7 +155,7 @@ async def on_simulation_end(ctx: SimulationContext) -> None:
     if not expected:
         return
 
-    last_booking = userdata.get("last_booking") if isinstance(userdata, dict) else None
+    last_booking = userdata.get("last_booking")
 
     if not last_booking:
         ctx.fail(reason="No appointment was actually booked in the calendar backend.")
@@ -340,20 +342,6 @@ async def entrypoint(ctx: JobContext) -> None:
             "job_ctx": ctx,
         },
     )
-
-    orig_generate_reply = session.generate_reply
-
-    def guarded_generate_reply(*args, **kwargs):
-        user_input = kwargs.get("user_input")
-        if user_input:
-            user_text = user_input if isinstance(user_input, str) else getattr(user_input, "text_content", "") or ""
-            is_blocked, response_text = _evaluate_guardrails(user_text, session, trace_id)
-            if is_blocked and response_text:
-                kwargs.pop("user_input", None)
-                kwargs["instructions"] = f"Immediately speak this exact message to the user and nothing else: {response_text}"
-        return orig_generate_reply(*args, **kwargs)
-
-    session.generate_reply = guarded_generate_reply
 
     await session.start(
         agent=ClinicReceptionistAgent(caller_phone=caller_phone),
