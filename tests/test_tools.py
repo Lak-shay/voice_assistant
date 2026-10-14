@@ -363,11 +363,30 @@ def test_get_sip_caller_phone_scenarios():
     mock_room_raw.remote_participants = {"p2": mock_participant_raw}
     assert get_sip_caller_phone(mock_room_raw) == "+18455559876"
 
+    # Test SIP participant identity without sip.phoneNumber attribute
+    mock_sip_id_p = MagicMock()
+    mock_sip_id_p.attributes = {}
+    mock_sip_id_p.identity = "sip_+18455554321"
+    mock_sip_id_room = MagicMock()
+    mock_sip_id_room.remote_participants = {"p3": mock_sip_id_p}
+    mock_sip_id_room.name = "regular_room"
+    assert get_sip_caller_phone(mock_sip_id_room) == "+18455554321"
+
+    # Test direct participant argument
+    assert get_sip_caller_phone(participant=mock_sip_id_p) == "+18455554321"
+
+    # Test room name regex fallback
+    mock_room_name_only = MagicMock()
+    mock_room_name_only.remote_participants = {}
+    mock_room_name_only.name = "call-_+18455554321_Xw6qGY5M6nCd"
+    assert get_sip_caller_phone(mock_room_name_only) == "+18455554321"
+
     mock_web_participant = MagicMock()
     mock_web_participant.attributes = {}
     mock_web_participant.identity = "playground_user_abc"
     mock_web_room = MagicMock()
     mock_web_room.remote_participants = {"p4": mock_web_participant}
+    mock_web_room.name = "playground_room"
     assert get_sip_caller_phone(mock_web_room) is None
 
     assert get_sip_caller_phone(None) is None

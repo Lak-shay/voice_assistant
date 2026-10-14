@@ -39,32 +39,37 @@ class TelemetryManager:
         self,
         room_name: str,
         participant_id: str | None = None,
+        session_id: str | None = None,
     ) -> Any | None:
         client = self.get_client()
         if not client:
             return None
 
-        trace_id_hex = Langfuse.create_trace_id(seed=room_name)
+        effective_session_id = session_id or room_name
+        trace_id_hex = Langfuse.create_trace_id(seed=effective_session_id)
+        metadata: dict[str, Any] = {
+            "room_name": room_name,
+            "clinic_name": settings.CLINIC_NAME,
+        }
+        if session_id and session_id != room_name:
+            metadata["room_sid"] = session_id
+
         try:
             with propagate_attributes(
                 trace_name="inbound_call",
-                session_id=room_name,
+                session_id=effective_session_id,
                 user_id=participant_id or "caller",
                 environment=settings.APP_ENV,
-                metadata={
-                    "room_name": room_name,
-                    "clinic_name": settings.CLINIC_NAME,
-                },
+                metadata=metadata,
             ):
                 trace = client.start_observation(
                     name="inbound_call",
                     trace_context={"trace_id": trace_id_hex},
-                    metadata={
-                        "room_name": room_name,
-                        "clinic_name": settings.CLINIC_NAME,
-                    },
+                    metadata=metadata,
                 )
             self._active_traces[room_name] = trace
+            if effective_session_id != room_name:
+                self._active_traces[effective_session_id] = trace
 
             if settings.LANGFUSE_PUBLIC_KEY and settings.LANGFUSE_SECRET_KEY:
                 try:

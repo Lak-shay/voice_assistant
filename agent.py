@@ -63,7 +63,7 @@ class ClinicReceptionistAgent(Agent):
                 "No phone number was received from caller ID. "
                 "When the customer agrees to an open slot, ask for their full name and phone number. "
                 "Never use or accept placeholder names like 'Anonymous', 'User', 'Caller', 'Test', or 'Unknown'. If the caller provides a placeholder name, immediately request their actual full name. "
-                "Validate the phone number before reading back or booking: if the caller provides an obviously invalid, dummy, or fake phone number (such as all zeros '000-000-0000', repeating digits, or dummy sequences), do not read it back or confirm it; immediately inform them that the number is invalid and ask for a valid ten-digit phone number. "
+                "Accept any standard 10-digit (domestic or international) or E.164 phone number provided by the caller. Only if the caller provides an obviously fake number such as all zeros ('000-000-0000') or single repeating digits ('111-111-1111'), inform them that the number is invalid and ask for a valid phone number. Do not reject real phone numbers or valid area codes. "
                 "Once a valid name and phone number are provided, you MUST read back their phone number in spoken digits and confirm the appointment date and time before booking (for example: 'Thank you. Just to confirm, your phone number is 5 5 5, 9 8 7, 6 5 4 3, and you would like Friday, October 9th at 2:30 PM?'). "
                 "Only after the caller explicitly confirms this readback, call book_appointment with their details. "
                 "Never call send_confirmation_sms in parallel with book_appointment; only call send_confirmation_sms in a subsequent turn after book_appointment returns success."
@@ -120,6 +120,9 @@ class ClinicReceptionistAgent(Agent):
 
 
 server = AgentServer(
+    ws_url=settings.LIVEKIT_URL,
+    api_key=settings.LIVEKIT_API_KEY,
+    api_secret=settings.LIVEKIT_API_SECRET,
     num_idle_processes=settings.NUM_IDLE_PROCESSES,
     job_executor_type=JobExecutorType.PROCESS,
     initialize_process_timeout=30.0,
@@ -231,12 +234,35 @@ async def entrypoint(ctx: JobContext) -> None:
     logger.info("[%s] Inbound call received. Connecting to room...", initial_id)
     await ctx.connect()
 
+    sim = ctx.simulation_context() if hasattr(ctx, "simulation_context") else None
+    participant = None
+    if not sim:
+        try:
+            participant = await asyncio.wait_for(
+                ctx.wait_for_participant(),
+                timeout=5.0,
+            )
+            logger.info(
+                "[%s] Participant joined: identity=%s, kind=%s",
+                initial_id,
+                getattr(participant, "identity", None),
+                getattr(participant, "kind", None),
+            )
+        except asyncio.TimeoutError:
+            logger.debug("[%s] Wait for participant timed out; proceeding with room check", initial_id)
+        except Exception as exc:
+            logger.debug("[%s] Exception waiting for participant: %s", initial_id, exc)
+
     raw_sid = getattr(ctx.room, "sid", None)
     room_sid = raw_sid if isinstance(raw_sid, str) and raw_sid else ctx.room.name
     trace_id = room_sid
     logger.info("[%s] Connected to room (sid=%s, name=%s). Initializing pipeline...", trace_id, getattr(ctx.room, "sid", ""), ctx.room.name)
 
-    telemetry.create_session_trace(trace_id)
+    telemetry.create_session_trace(
+        room_name=ctx.room.name,
+        participant_id=getattr(participant, "identity", None),
+        session_id=room_sid,
+    )
 
     async def on_shutdown() -> None:
         logger.info("[%s] Call ended. Flushing telemetry...", trace_id)
@@ -245,26 +271,25 @@ async def entrypoint(ctx: JobContext) -> None:
     ctx.add_shutdown_callback(on_shutdown)
 
     @ctx.room.on("participant_connected")
-    def on_participant_connected(participant: rtc.RemoteParticipant) -> None:
+    def on_participant_connected(remote_p: rtc.RemoteParticipant) -> None:
         logger.debug(
             "[%s] Participant connected: identity=%s, kind=%s, attributes=%s",
             trace_id,
-            getattr(participant, "identity", None),
-            getattr(participant, "kind", None),
-            getattr(participant, "attributes", None),
+            getattr(remote_p, "identity", None),
+            getattr(remote_p, "kind", None),
+            getattr(remote_p, "attributes", None),
         )
 
     @ctx.room.on("participant_attributes_changed")
-    def on_attributes_changed(changed_attributes: dict[str, str], participant: rtc.RemoteParticipant) -> None:
+    def on_attributes_changed(changed_attributes: dict[str, str], remote_p: rtc.RemoteParticipant) -> None:
         logger.debug(
             "[%s] Participant attributes updated: changed=%s, all=%s",
             trace_id,
             changed_attributes,
-            getattr(participant, "attributes", None),
+            getattr(remote_p, "attributes", None),
         )
 
-    caller_phone = get_sip_caller_phone(ctx.room)
-    sim = ctx.simulation_context() if hasattr(ctx, "simulation_context") else None
+    caller_phone = get_sip_caller_phone(ctx.room, participant)
     if sim and "caller_phone" in sim.userdata():
         caller_phone = sim.userdata().get("caller_phone")
     if caller_phone:

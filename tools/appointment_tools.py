@@ -166,29 +166,50 @@ async def check_availability(
         return "I had trouble checking the schedule just now. Could you please repeat your preferred date?"
 
 
-def get_sip_caller_phone(room: rtc.Room | None) -> str | None:
-    """Extract E.164 phone number from SIP participant 'sip.phoneNumber' attribute."""
-    if not room or not hasattr(room, "remote_participants"):
-        return None
-    for p_id, participant in room.remote_participants.items():
+def get_sip_caller_phone(room: rtc.Room | None = None, participant: rtc.Participant | None = None) -> str | None:
+    """Extract E.164 phone number from SIP participant attributes, identity, or room name."""
+    candidates: list[str] = []
+
+    # 1. Inspect explicitly passed participant
+    if participant is not None:
         attrs = getattr(participant, "attributes", {}) or {}
-        logger.debug(
-            "Evaluating participant [%s] for SIP caller data: identity=%s, kind=%s, attributes=%s",
-            p_id,
-            getattr(participant, "identity", None),
-            getattr(participant, "kind", None),
-            attrs,
-        )
-        phone = attrs.get("sip.phoneNumber")
-        if phone:
-            sanitized = sanitize_e164(phone)
-            logger.debug(
-                "Extracted SIP caller phone from 'sip.phoneNumber': raw=%s, sanitized=%s",
-                phone,
-                sanitized,
-            )
-            if sanitized:
-                return sanitized
+        if isinstance(attrs, dict) and attrs.get("sip.phoneNumber"):
+            candidates.append(attrs["sip.phoneNumber"])
+        identity = getattr(participant, "identity", None)
+        if isinstance(identity, str):
+            if identity.startswith("sip_"):
+                candidates.append(identity.removeprefix("sip_"))
+            elif not identity.startswith("playground_") and not identity.startswith("agent_"):
+                candidates.append(identity)
+
+    # 2. Inspect all remote participants in room
+    if room and hasattr(room, "remote_participants") and isinstance(room.remote_participants, dict):
+        for p in room.remote_participants.values():
+            attrs = getattr(p, "attributes", {}) or {}
+            if isinstance(attrs, dict) and attrs.get("sip.phoneNumber"):
+                candidates.append(attrs["sip.phoneNumber"])
+            identity = getattr(p, "identity", None)
+            if isinstance(identity, str):
+                if identity.startswith("sip_"):
+                    candidates.append(identity.removeprefix("sip_"))
+                elif not identity.startswith("playground_") and not identity.startswith("agent_"):
+                    candidates.append(identity)
+
+    # 3. Fallback: inspect room name pattern (e.g. call-_+18455554321_Xw6qGY5M6nCd)
+    if room and hasattr(room, "name"):
+        raw_name = getattr(room, "name", None)
+        if isinstance(raw_name, str):
+            import re
+            match = re.search(r"(\+?\d{10,15})", raw_name)
+            if match:
+                candidates.append(match.group(1))
+
+    for cand in candidates:
+        sanitized = sanitize_e164(cand)
+        if sanitized:
+            logger.info("Resolved caller phone number: raw=%s, sanitized=%s", cand, sanitized)
+            return sanitized
+
     return None
 
 

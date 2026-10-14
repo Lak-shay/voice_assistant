@@ -3,6 +3,9 @@ from pathlib import Path
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
+from dotenv import load_dotenv
+
+
 def get_active_env_file() -> str:
     app_env = os.getenv("APP_ENV", os.getenv("ENV", "dev")).strip().lower()
     if app_env in ("prod", "production"):
@@ -13,6 +16,11 @@ def get_active_env_file() -> str:
     if not Path(target_file).exists() and Path(".env").exists():
         return ".env"
     return target_file
+
+
+_active_env_file = get_active_env_file()
+if Path(_active_env_file).exists():
+    load_dotenv(_active_env_file, override=False)
 
 
 class Settings(BaseSettings):

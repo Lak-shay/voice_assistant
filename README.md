@@ -300,9 +300,47 @@ Available scenarios in `simulations/scenarios.yaml`:
 
 ---
 
-## Telephony Setup (Telnyx to LiveKit)
+## Telephony Setup (Telnyx to LiveKit SIP)
 
-1. **Number Provisioning:** Purchase or port a DID phone number in Telnyx (`TELNYX_PHONE_NUMBER`).
-2. **SIP Trunk Association:** Create an Outbound SIP Trunk in Telnyx pointing to the LiveKit SIP domain (`<project>.sip.livekit.cloud`).
-3. **Failover Routing:** Configure Telnyx carrier-level failover: if SIP handshake times out, forward inbound calls directly to the clinic front desk (`CLINIC_FAILOVER_PHONE`).
-4. **Conditional Forwarding:** On the clinic's local phone system, configure conditional call forwarding (Busy / No Answer after 3 rings) to the Telnyx phone number.
+### 1. Telnyx FQDN Connection Configuration
+1. **LiveKit SIP Domain:** In the LiveKit Cloud Console under Telephony / SIP, locate your project's SIP URI. 
+   - Format: `sip:<project-id>.sip.livekit.cloud` (e.g., if project ID is `p_ex3yf69j4pp`, the SIP domain is `ex3yf69j4pp.sip.livekit.cloud`).
+   - **Crucial:** Do NOT use the WebSocket domain (e.g., `voice-assistant-xxxx.livekit.cloud`). LiveKit Cloud's SIP edge proxy only routes SIP packets matching the exact `<project-id>.sip.livekit.cloud` host.
+2. **Telnyx FQDN Record:** Under **SIP Trunking > FQDNs** in the Telnyx Portal:
+   - **FQDN:** `<project-id>.sip.livekit.cloud` (e.g., `ex3yf69j4pp.sip.livekit.cloud`)
+   - **Port:** `5060`
+   - **DNS Record Type:** `A`
+3. **Compact Headers:** In your Telnyx SIP Connection settings, ensure **SIP Compact Headers** is set to **Disabled** (`sip_compact_headers_enabled: false`). LiveKit's SIP proxy expects full standard SIP header names.
+
+### 2. LiveKit Cloud SIP Trunk & Dispatch Rule
+1. **Inbound Trunk (`livekit.protocol.sip.SIPInboundTrunkInfo`):**
+   - The trunk's `numbers` array must match incoming caller dial patterns. Because telephony carriers may send the dialed number in E.164, 11-digit national, or 10-digit formats, populate all three:
+     ```python
+     numbers = ["+18453768795", "18453768795", "8453768795"]
+     ```
+2. **Dispatch Rule (`livekit.protocol.sip.SIPDispatchRuleInfo`):**
+   - Route inbound calls to an agent by setting `dispatch_rule.dispatch_rule_individual.room_prefix` and assigning `room_config.agents` with `agent_name = "clinic-receptionist"`.
+   - Leave `trunk_ids` empty to accept calls across any configured inbound trunk, or explicitly add your trunk ID.
+
+### 3. Failover & Conditional Forwarding
+1. **Carrier Failover:** In Telnyx, set the SIP Connection failover to forward calls to the front desk PSTN number (`CLINIC_FAILOVER_PHONE`) if the LiveKit SIP proxy is unreachable or times out.
+2. **Conditional Forwarding:** On clinic landlines/PBX, set conditional forwarding (busy / no answer after 3 rings) to your Telnyx DID (`TELNYX_PHONE_NUMBER`).
+
+---
+
+## Telnyx & LiveKit SIP Troubleshooting Guide
+
+If an inbound call fails to reach the agent worker (`agent.py dev`), use the diagnostic matrix below:
+
+| Symptom / Audio Announcement | Telnyx CDR Status & Code | Root Cause | Resolution |
+| --- | --- | --- | --- |
+| **Immediate busy tone / instant disconnect** | `send_refuse` / Error `D61` (`486 USER_BUSY`) | **Unverified Caller on Trial Tier:** Telnyx trial accounts reject calls from external numbers that are not pre-verified. | Upgrade the Telnyx account or add the calling number to **Account Settings > Verified Numbers** in the Telnyx Portal. |
+| **"The dialed number is invalid" announcement** | `recv_refuse` / Error `D00` (`404 UNALLOCATED_NUMBER`) | **FQDN Mismatch:** Telnyx FQDN points to the wrong host (e.g., WebSocket host instead of `<project-id>.sip.livekit.cloud`). | Verify LiveKit Project ID and update Telnyx FQDN (`PATCH /v2/fqdns/{id}`) to `sip:<project-id>.sip.livekit.cloud`. |
+| **"The dialed number is invalid" announcement** | `recv_refuse` / Error `D00` (`404 UNALLOCATED_NUMBER`) | **Trunk Number Mismatch:** LiveKit Inbound Trunk does not recognize the incoming number format. | Add `+1XXXXXXXXXX`, `1XXXXXXXXXX`, and `XXXXXXXXXX` to the LiveKit Inbound Trunk `numbers` list. |
+| **Call rings continuously, no answer** | `hangup` / SIP timeout | **Worker Offline or Name Mismatch:** No active worker registered on LiveKit Cloud for the target agent name. | Verify `agent.py dev` is running and the worker registers with `agent_name="clinic-receptionist"`. |
+
+### Inspecting Telnyx Call Detail Records (CDRs)
+When diagnosing call connection issues, download the CDR CSV from **Telnyx Portal > Reporting > CDRs**:
+- `call_status`: `send_refuse` indicates Telnyx rejected the call before forwarding; `recv_refuse` indicates LiveKit Cloud rejected the SIP INVITE.
+- `hangup_source`: Indicates whether the caller, Telnyx, or the carrier/SIP proxy ended the session.
+- `sip_call_id`: Correlates with LiveKit SIP bridge logs in LiveKit Cloud Telemetry.
