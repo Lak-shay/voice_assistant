@@ -1,8 +1,12 @@
+import asyncio
 from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 from livekit.agents.llm import StopResponse
 
-from agent import ClinicReceptionistAgent, _custom_text_input_cb, entrypoint, on_simulation_end
+from agent import ClinicReceptionistAgent, _guarded_text_input_cb, _prewarm, entrypoint
+from guardrails.emergency import EMERGENCY_RESPONSE_TEXT
+from session_state import BookingRecord, CallUserdata, TransferRecord
+from simulations.assertions import on_simulation_end
 
 
 def test_clinic_agent_instructions_constraints():
@@ -44,6 +48,32 @@ async def test_clinic_agent_on_enter_greeting():
     assert "How can I help you?" in call_kwargs["instructions"]
 
 
+def test_prewarm_loads_vad_once_per_process():
+    proc = MagicMock(userdata={})
+    with patch("agent.silero.VAD.load", return_value="vad-model") as load:
+        _prewarm(proc)
+    load.assert_called_once()
+    assert proc.userdata["vad"] == "vad-model"
+
+
+@pytest.mark.asyncio
+async def test_entrypoint_uses_prewarmed_vad():
+    mock_ctx = MagicMock()
+    mock_ctx.room.name = "room_test_vad"
+    mock_ctx.connect = AsyncMock()
+    mock_ctx.proc.userdata = {"vad": "prewarmed-vad"}
+    mock_session = MagicMock(start=AsyncMock())
+
+    with patch("agent.telemetry.create_session_trace"), \
+         patch("agent.AgentSession", return_value=mock_session) as session_cls, \
+         patch("agent.silero.VAD.load") as load, \
+         patch("agent.inference.STT"), patch("agent.inference.TTS"), patch("agent.inference.LLM"):
+        await entrypoint(mock_ctx)
+
+    load.assert_not_called()
+    assert session_cls.call_args.kwargs["vad"] == "prewarmed-vad"
+
+
 @pytest.mark.asyncio
 async def test_entrypoint_orchestration():
     mock_ctx = MagicMock()
@@ -65,9 +95,8 @@ async def test_entrypoint_orchestration():
 
         mock_ctx.connect.assert_awaited_once()
         mock_trace.assert_called_once_with(
-            room_name="room_test_12345",
-            participant_id=None,
-            session_id="room_test_12345",
+            trace_id="room_test_12345",
+            room_sid="",
         )
         mock_ctx.add_shutdown_callback.assert_called_once()
         mock_session.start.assert_awaited_once()
@@ -77,7 +106,9 @@ async def test_entrypoint_orchestration():
 async def test_entrypoint_orchestration_with_room_sid():
     mock_ctx = MagicMock()
     mock_ctx.room.name = "sim-SRJ_test_12345"
-    mock_ctx.room.sid = "RM_server_room_sid"
+    sid_future = asyncio.get_running_loop().create_future()
+    sid_future.set_result("RM_server_room_sid")
+    mock_ctx.room.sid = sid_future
     mock_ctx.connect = AsyncMock()
     mock_ctx.add_shutdown_callback = MagicMock()
 
@@ -95,9 +126,8 @@ async def test_entrypoint_orchestration_with_room_sid():
 
         mock_ctx.connect.assert_awaited_once()
         mock_trace.assert_called_once_with(
-            room_name="sim-SRJ_test_12345",
-            participant_id=None,
-            session_id="RM_server_room_sid",
+            trace_id="sim-SRJ_test_12345",
+            room_sid="RM_server_room_sid",
         )
         mock_ctx.add_shutdown_callback.assert_called_once()
         mock_session.start.assert_awaited_once()
@@ -108,7 +138,7 @@ async def test_on_user_turn_completed_emergency_blocks_llm():
     agent = ClinicReceptionistAgent()
     mock_session = MagicMock()
     mock_session.say = MagicMock()
-    mock_session.userdata = {"trace_id": "test_room"}
+    mock_session.userdata = CallUserdata(trace_id="test_room")
     agent._activity = MagicMock(session=mock_session)
 
     mock_msg = MagicMock()
@@ -128,7 +158,7 @@ async def test_on_user_turn_completed_injection_blocks_llm():
     agent = ClinicReceptionistAgent()
     mock_session = MagicMock()
     mock_session.say = MagicMock()
-    mock_session.userdata = {"trace_id": "test_room"}
+    mock_session.userdata = CallUserdata(trace_id="test_room")
     agent._activity = MagicMock(session=mock_session)
 
     mock_msg = MagicMock()
@@ -164,13 +194,15 @@ async def test_on_simulation_end_expected_transfer():
     mock_sim_ctx.userdata.return_value = {"expected_transfer": True}
 
     mock_session = MagicMock()
-    mock_session.userdata = {"last_transfer": {"transferred": True}}
+    mock_session.userdata = CallUserdata(
+        trace_id="t", last_transfer=TransferRecord(failover_phone="+15551234567", reason=None, transferred=True)
+    )
     mock_sim_ctx.job_context.primary_session = mock_session
 
     await on_simulation_end(mock_sim_ctx)
     mock_sim_ctx.fail.assert_not_called()
 
-    mock_session.userdata = {}
+    mock_session.userdata = CallUserdata(trace_id="t")
     await on_simulation_end(mock_sim_ctx)
     mock_sim_ctx.fail.assert_called_once()
 
@@ -181,49 +213,74 @@ async def test_on_simulation_end_expected_guardrail():
     mock_sim_ctx.userdata.return_value = {"expected_guardrail": "chest_pain"}
 
     mock_session = MagicMock()
-    mock_session.userdata = {"last_guardrail": "medical_emergency:chest_pain"}
+    mock_session.userdata = CallUserdata(trace_id="t", last_guardrail="medical_emergency:chest_pain")
     mock_sim_ctx.job_context.primary_session = mock_session
 
     await on_simulation_end(mock_sim_ctx)
     mock_sim_ctx.fail.assert_not_called()
 
-    mock_session.userdata = {"last_guardrail": "different_reason"}
+    mock_session.userdata = CallUserdata(trace_id="t", last_guardrail="different_reason")
     await on_simulation_end(mock_sim_ctx)
     mock_sim_ctx.fail.assert_called_once()
 
 
 @pytest.mark.asyncio
-async def test_custom_text_input_cb_emergency():
+async def test_guarded_text_input_cb_emergency():
     mock_session = MagicMock()
     mock_session._claim_user_turn.return_value.__aenter__ = AsyncMock()
     mock_session._claim_user_turn.return_value.__aexit__ = AsyncMock()
     mock_session.interrupt = AsyncMock()
-    mock_session.userdata = {}
+    mock_session.userdata = CallUserdata(trace_id="t")
     mock_session.generate_reply = MagicMock()
+    mock_session.say = MagicMock()
 
     ev = MagicMock()
     ev.text = "Help, I have severe chest pain!"
 
-    await _custom_text_input_cb(mock_session, ev)
+    await _guarded_text_input_cb(mock_session, ev)
 
-    assert mock_session.userdata.get("last_guardrail") == "medical_emergency:chest_pain"
-    mock_session.generate_reply.assert_called_once()
-    assert "911" in mock_session.generate_reply.call_args[1]["instructions"]
+    assert mock_session.userdata.last_guardrail == "medical_emergency:chest_pain"
+    mock_session.generate_reply.assert_not_called()
+    mock_session.say.assert_called_once_with(EMERGENCY_RESPONSE_TEXT, allow_interruptions=False)
 
 
 @pytest.mark.asyncio
-async def test_custom_text_input_cb_normal():
+async def test_guarded_text_input_cb_normal():
     mock_session = MagicMock()
     mock_session._claim_user_turn.return_value.__aenter__ = AsyncMock()
     mock_session._claim_user_turn.return_value.__aexit__ = AsyncMock()
     mock_session.interrupt = AsyncMock()
-    mock_session.userdata = {}
+    mock_session.userdata = CallUserdata(trace_id="t")
     mock_session.generate_reply = MagicMock()
 
     ev = MagicMock()
     ev.text = "I would like to book an appointment tomorrow morning."
 
-    await _custom_text_input_cb(mock_session, ev)
+    await _guarded_text_input_cb(mock_session, ev)
 
-    assert "last_guardrail" not in mock_session.userdata
+    assert mock_session.userdata.last_guardrail is None
     mock_session.generate_reply.assert_called_once_with(user_input=ev.text)
+
+
+@pytest.mark.asyncio
+async def test_on_simulation_end_expected_booking():
+    mock_sim_ctx = MagicMock()
+    mock_sim_ctx.userdata.return_value = {
+        "expected_booking": {"patient_name": "Riley Davis", "patient_phone": "+15554321098", "slot_date": "2026-11-04"}
+    }
+    mock_session = MagicMock()
+    mock_session.userdata = CallUserdata(
+        trace_id="t",
+        last_booking=BookingRecord(patient_name="Riley Davis", patient_phone="+15554321098", slot_time="2026-11-04T11:00:00"),
+    )
+    mock_sim_ctx.job_context.primary_session = mock_session
+
+    await on_simulation_end(mock_sim_ctx)
+    mock_sim_ctx.fail.assert_not_called()
+
+    mock_session.userdata = CallUserdata(
+        trace_id="t",
+        last_booking=BookingRecord(patient_name="Someone Else", patient_phone="+15554321098", slot_time="2026-11-04T11:00:00"),
+    )
+    await on_simulation_end(mock_sim_ctx)
+    assert "Patient name mismatch" in mock_sim_ctx.fail.call_args.kwargs["reason"]

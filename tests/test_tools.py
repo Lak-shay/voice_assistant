@@ -1,32 +1,30 @@
 import asyncio
 import datetime
+import sqlite3
 from unittest.mock import AsyncMock, MagicMock
 from zoneinfo import ZoneInfo
 import pytest
 from livekit import rtc
 
+from clinic_time import parse_flexible_date, parse_flexible_slot
+from session_state import BookingRecord, CallUserdata
 from tools.appointment_tools import (
     book_appointment,
     check_availability,
-    format_date_phonetically,
-    format_slot_phonetically,
-    get_sip_caller_phone,
     send_confirmation_sms,
     transfer_to_human,
 )
-from tools.calendar_service import (
-    CalendarService,
-    calendar_service,
-    parse_flexible_date,
-    parse_flexible_slot,
-)
+from tools.calendar_service import NOT_A_SLOT_ERROR, CalendarService, CalendarUnavailableError, calendar_service
+from tools.phone import get_sip_caller_phone
 from tools.sms_service import SMSService
+from tools.speech_format import format_date_phonetically, format_slot_phonetically
+
+FUTURE_ISO = (datetime.date.today() + datetime.timedelta(days=14)).isoformat()
 
 
 @pytest.fixture(autouse=True)
 def isolate_test_environment(monkeypatch):
     monkeypatch.setattr("tools.calendar_service.settings.CALENDAR_BACKEND", "mock")
-    monkeypatch.setattr("tools.appointment_tools.settings.CALENDAR_BACKEND", "mock")
     calendar_service.clear_reservations()
 
 
@@ -43,18 +41,34 @@ def test_format_slot_phonetically():
 @pytest.mark.asyncio
 async def test_calendar_service_all_slots():
     cal = CalendarService()
-    slots = await cal.get_all_slots_for_date("2026-09-15")
+    slots = await cal.get_all_slots_for_date(FUTURE_ISO)
     assert len(slots) > 0
-    assert "2026-09-15T09:00:00" in slots
+    assert f"{FUTURE_ISO}T09:00:00" in slots
+
+    assert await cal.get_all_slots_for_date("2020-01-06") == []
 
     invalid_slots = await cal.get_all_slots_for_date("not-a-date")
     assert invalid_slots == []
 
 
+def test_google_credentials_fall_back_to_secrets_mount(monkeypatch, tmp_path):
+    mounted = tmp_path / "missing-credentials.json"
+    mounted.write_text("{}")
+    monkeypatch.setattr("tools.calendar_service.settings.CALENDAR_BACKEND", "google")
+    monkeypatch.setattr("tools.calendar_service.settings.CALENDAR_API_KEY", "missing-credentials.json")
+    monkeypatch.setattr("tools.calendar_service.settings.SECRETS_MOUNT_DIR", str(tmp_path))
+    from_file = MagicMock()
+    monkeypatch.setattr("tools.calendar_service.service_account.Credentials.from_service_account_file", from_file)
+    monkeypatch.setattr("tools.calendar_service.build", MagicMock())
+
+    assert CalendarService().get_google_service() is not None
+    assert from_file.call_args.args[0] == str(mounted)
+
+
 @pytest.mark.asyncio
 async def test_calendar_service_booking_and_conflict():
     cal = CalendarService()
-    slot = "2026-09-15T10:00:00"
+    slot = f"{FUTURE_ISO}T10:00:00"
 
     res = await cal.book_slot(slot, "Alice Walker", "+15551112222")
     assert res["success"] is True
@@ -85,7 +99,7 @@ async def test_sms_service_mock_mode():
 @pytest.mark.asyncio
 async def test_tool_check_availability():
     mock_run_ctx = MagicMock()
-    result = await check_availability(mock_run_ctx, preferred_date="2026-09-12")
+    result = await check_availability(mock_run_ctx, preferred_date=FUTURE_ISO)
     assert isinstance(result, str)
     assert "openings" in result.lower() or "slots" in result.lower()
     for forbidden in ("**", "*", "#", "```", "http"):
@@ -99,23 +113,23 @@ async def test_tool_check_availability_partial_slots(monkeypatch):
     monkeypatch.setattr(
         calendar_service,
         "get_slots_by_period",
-        AsyncMock(return_value={"morning": ["2026-09-12T09:00:00"], "afternoon": [], "evening": []}),
+        AsyncMock(return_value={"morning": [f"{FUTURE_ISO}T09:00:00"], "afternoon": [], "evening": []}),
     )
-    res_one = await check_availability(mock_run_ctx, preferred_date="2026-09-12")
+    res_one = await check_availability(mock_run_ctx, preferred_date=FUTURE_ISO)
     assert "an opening on" in res_one
 
     monkeypatch.setattr(
         calendar_service,
         "get_slots_by_period",
-        AsyncMock(return_value={"morning": ["2026-09-12T09:00:00"], "afternoon": ["2026-09-12T14:00:00"], "evening": []}),
+        AsyncMock(return_value={"morning": [f"{FUTURE_ISO}T09:00:00"], "afternoon": [f"{FUTURE_ISO}T14:00:00"], "evening": []}),
     )
-    res_two = await check_availability(mock_run_ctx, preferred_date="2026-09-12")
+    res_two = await check_availability(mock_run_ctx, preferred_date=FUTURE_ISO)
     assert "morning and afternoon" in res_two
     assert "evening" not in res_two
 
     res_time_unavailable = await check_availability(
         mock_run_ctx,
-        preferred_date="2026-09-12",
+        preferred_date=FUTURE_ISO,
         preferred_time="5:00 PM",
     )
     assert "unavailable" in res_time_unavailable
@@ -124,10 +138,10 @@ async def test_tool_check_availability_partial_slots(monkeypatch):
 
     res_period = await check_availability(
         mock_run_ctx,
-        preferred_date="2026-09-12",
+        preferred_date=FUTURE_ISO,
         preferred_period="morning",
     )
-    assert "September 12th at 9 AM" in res_period
+    assert format_slot_phonetically(f"{FUTURE_ISO}T09:00:00") in res_period
 
 
 @pytest.mark.asyncio
@@ -137,7 +151,7 @@ async def test_tool_book_appointment():
         mock_run_ctx,
         patient_name="Sarah Connor",
         patient_phone="+15553332222",
-        slot_time="2026-09-12T10:30:00",
+        slot_time=f"{FUTURE_ISO}T10:30:00",
     )
     mock_run_ctx.disallow_interruptions.assert_called_once()
     assert "Sarah Connor" in result
@@ -147,16 +161,36 @@ async def test_tool_book_appointment():
 
 
 @pytest.mark.asyncio
-async def test_tool_send_confirmation_sms():
-    mock_run_ctx = MagicMock()
-    result = await send_confirmation_sms(
-        mock_run_ctx,
-        patient_phone="+15553332222",
-        appointment_summary="September 12th at 10 30 AM",
+async def test_tool_send_confirmation_sms(monkeypatch):
+    send = AsyncMock(return_value={"success": True})
+    monkeypatch.setattr("tools.appointment_tools.sms_service.send_confirmation", send)
+    ctx = MagicMock()
+    ctx.userdata = CallUserdata(
+        trace_id="t",
+        last_booking=BookingRecord(patient_name="Sarah Connor", patient_phone="+15553332222", slot_time=f"{FUTURE_ISO}T10:30:00"),
     )
+
+    result = await send_confirmation_sms(ctx)
+
     assert "confirmation" in result.lower()
     for forbidden in ("**", "*", "#", "```"):
         assert forbidden not in result
+    to_phone, message = send.call_args.args
+    assert to_phone == "+15553332222"
+    assert format_slot_phonetically(f"{FUTURE_ISO}T10:30:00") in message
+
+
+@pytest.mark.asyncio
+async def test_tool_send_confirmation_sms_requires_booking(monkeypatch):
+    send = AsyncMock(return_value={"success": True})
+    monkeypatch.setattr("tools.appointment_tools.sms_service.send_confirmation", send)
+    ctx = MagicMock()
+    ctx.userdata = CallUserdata(trace_id="t")
+
+    result = await send_confirmation_sms(ctx)
+
+    assert "after an appointment has been booked" in result
+    send.assert_not_called()
 
 
 @pytest.mark.asyncio
@@ -172,7 +206,7 @@ async def test_google_calendar_check_and_book_success():
     mock_google.events.return_value.insert.return_value = mock_ins
     cal._google_service = mock_google
 
-    res = await cal.book_slot("2026-10-15T10:00:00", "John Doe", "+15554443333")
+    res = await cal.book_slot(f"{FUTURE_ISO}T10:00:00", "John Doe", "+15554443333")
     assert res["success"] is True
     assert res["event_id"] == "event_gcal_12345"
     mock_google.freebusy.return_value.query.assert_called_once()
@@ -189,8 +223,8 @@ async def test_google_calendar_slot_busy_rejection():
             "primary": {
                 "busy": [
                     {
-                        "start": "2026-10-15T09:45:00-04:00",
-                        "end": "2026-10-15T10:15:00-04:00",
+                        "start": f"{FUTURE_ISO}T09:45:00",
+                        "end": f"{FUTURE_ISO}T10:15:00",
                     }
                 ]
             }
@@ -199,7 +233,7 @@ async def test_google_calendar_slot_busy_rejection():
     mock_google.freebusy.return_value.query.return_value = mock_fb
     cal._google_service = mock_google
 
-    res = await cal.book_slot("2026-10-15T10:00:00", "Jane Doe", "+15556667777")
+    res = await cal.book_slot(f"{FUTURE_ISO}T10:00:00", "Jane Doe", "+15556667777")
     assert res["success"] is False
     assert "taken" in res["error"] or "unavailable" in res["error"]
     mock_google.freebusy.return_value.query.assert_called_once()
@@ -209,7 +243,7 @@ async def test_google_calendar_slot_busy_rejection():
 @pytest.mark.asyncio
 async def test_calendar_service_thread_concurrency_lock():
     cal = CalendarService()
-    slot = "2026-11-01T14:00:00"
+    slot = f"{FUTURE_ISO}T14:00:00"
 
     results = await asyncio.gather(
         cal.book_slot(slot, "Patient One", "+15551111111"),
@@ -227,8 +261,8 @@ async def test_calendar_service_thread_concurrency_lock():
 @pytest.mark.asyncio
 async def test_contention_same_slot_fallback_booking():
     cal = CalendarService()
-    contested_slot = "2026-10-25T10:00:00"
-    alternative_slot = "2026-10-25T10:30:00"
+    contested_slot = f"{FUTURE_ISO}T10:00:00"
+    alternative_slot = f"{FUTURE_ISO}T10:30:00"
 
     results = await asyncio.gather(
         cal.book_slot(contested_slot, "Alex Taylor", "+15551112222"),
@@ -250,6 +284,26 @@ async def test_contention_same_slot_fallback_booking():
     assert fallback_res["success"] is True
     assert fallback_res["slot_time"] == alternative_slot
     assert fallback_res["patient_name"] == failed_caller
+
+
+@pytest.mark.asyncio
+async def test_overlapping_bookings_are_rejected_and_hidden(monkeypatch):
+    monkeypatch.setattr("tools.calendar_service.settings.APPOINTMENT_DEFAULT_DURATION_MINUTES", 60)
+    cal = CalendarService()
+
+    first = await cal.book_slot(f"{FUTURE_ISO}T10:00:00", "Alice Walker", "+15551112222")
+    overlapping = await cal.book_slot(f"{FUTURE_ISO}T10:30:00", "Bob Jones", "+15553334444")
+    adjacent = await cal.book_slot(f"{FUTURE_ISO}T11:00:00", "Cara Diaz", "+15555556666")
+
+    assert first["success"] is True
+    assert overlapping == {"success": False, "error": "This slot was just taken. Please select another open time."}
+    assert adjacent["success"] is True
+
+    slots = await cal.get_all_slots_for_date(FUTURE_ISO)
+    assert f"{FUTURE_ISO}T09:00:00" in slots
+    for hidden in ("09:30", "10:00", "10:30", "11:00", "11:30"):
+        assert f"{FUTURE_ISO}T{hidden}:00" not in slots
+    assert f"{FUTURE_ISO}T12:00:00" in slots
 
 
 def test_parse_flexible_date():
@@ -320,7 +374,7 @@ async def test_tool_book_appointment_natural_language():
         mock_run_ctx,
         patient_name="Alex Mercer",
         patient_phone="(555) 234-5678",
-        slot_time="2026-10-15 10:00 AM",
+        slot_time=f"{FUTURE_ISO} 10:00 AM",
     )
     assert "Alex Mercer" in result
     assert "confirmed" in result.lower()
@@ -345,8 +399,96 @@ async def test_google_calendar_freebusy_error_handling(monkeypatch):
     mock_google.freebusy.return_value.query.side_effect = Exception("API connection dropped")
     cal._google_service = mock_google
 
-    busy = cal._sync_query_google_busy(datetime.date(2026, 10, 5))
-    assert busy == []
+    tz = ZoneInfo("America/New_York")
+    with pytest.raises(CalendarUnavailableError):
+        cal._sync_query_google_busy(
+            datetime.datetime(2026, 10, 5, 9, tzinfo=tz),
+            datetime.datetime(2026, 10, 5, 18, tzinfo=tz),
+        )
+
+
+@pytest.mark.asyncio
+async def test_google_booking_fails_closed_when_freebusy_errors():
+    cal = CalendarService()
+    mock_google = MagicMock()
+    mock_google.freebusy.return_value.query.return_value.execute.side_effect = Exception("503 backendError")
+    cal._google_service = mock_google
+    slot = f"{FUTURE_ISO}T10:00:00"
+
+    res = await cal.book_slot(slot, "Jane Doe", "+15556667777")
+
+    assert res["success"] is False
+    assert "temporary" in res["error"].lower()
+    mock_google.events.return_value.insert.assert_not_called()
+    assert slot not in cal._get_db_booked_slots(FUTURE_ISO)
+
+
+def test_freebusy_calendar_errors_raise():
+    cal = CalendarService()
+    mock_google = MagicMock()
+    mock_google.freebusy.return_value.query.return_value.execute.return_value = {
+        "calendars": {"primary": {"errors": [{"reason": "notFound"}], "busy": []}}
+    }
+    cal._google_service = mock_google
+    tz = ZoneInfo("America/New_York")
+    with pytest.raises(CalendarUnavailableError):
+        cal._sync_query_google_busy(
+            datetime.datetime(2026, 10, 5, 9, tzinfo=tz),
+            datetime.datetime(2026, 10, 5, 18, tzinfo=tz),
+        )
+
+
+@pytest.mark.asyncio
+async def test_check_availability_reports_calendar_outage(monkeypatch):
+    monkeypatch.setattr("tools.calendar_service.settings.CALENDAR_BACKEND", "google")
+    monkeypatch.setattr(calendar_service, "_google_service", None)
+    monkeypatch.setattr(calendar_service, "get_google_service", lambda: None)
+
+    res = await check_availability(MagicMock(), preferred_date=FUTURE_ISO)
+
+    assert "trouble checking the schedule" in res
+
+
+@pytest.mark.asyncio
+async def test_google_backend_without_client_does_not_book(monkeypatch):
+    monkeypatch.setattr("tools.calendar_service.settings.CALENDAR_BACKEND", "google")
+    cal = CalendarService()
+    monkeypatch.setattr(cal, "get_google_service", lambda: None)
+    slot = f"{FUTURE_ISO}T10:00:00"
+
+    res = await cal.book_slot(slot, "Jane Doe", "+15556667777")
+
+    assert res["success"] is False
+    assert slot not in cal._get_db_booked_slots(FUTURE_ISO)
+
+
+def test_google_client_init_is_retried_after_failure(monkeypatch):
+    monkeypatch.setattr("tools.calendar_service.settings.CALENDAR_BACKEND", "google")
+    monkeypatch.setattr("tools.calendar_service.settings.CALENDAR_API_KEY", "{not valid json")
+    cal = CalendarService()
+    assert cal.get_google_service() is None
+
+    monkeypatch.setattr("tools.calendar_service.settings.CALENDAR_API_KEY", '{"type": "service_account"}')
+    monkeypatch.setattr("tools.calendar_service.service_account.Credentials.from_service_account_info", MagicMock())
+    monkeypatch.setattr("tools.calendar_service.build", MagicMock())
+    assert cal.get_google_service() is not None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "slot_time",
+    [
+        f"{FUTURE_ISO}T07:00:00",
+        f"{FUTURE_ISO}T18:00:00",
+        f"{FUTURE_ISO}T19:45:00",
+        f"{FUTURE_ISO}T10:17:00",
+        (datetime.date.today() - datetime.timedelta(days=1)).isoformat() + "T10:00:00",
+    ],
+)
+async def test_book_slot_rejects_times_outside_the_schedule(slot_time):
+    res = await CalendarService().book_slot(slot_time, "Jane Doe", "+15556667777")
+    assert res["success"] is False
+    assert res["error"] == NOT_A_SLOT_ERROR
 
 
 def test_get_sip_caller_phone_scenarios():
@@ -392,6 +534,18 @@ def test_get_sip_caller_phone_scenarios():
     assert get_sip_caller_phone(None) is None
 
 
+def test_get_sip_caller_phone_ignores_digit_runs_outside_sip():
+    web_user = MagicMock(attributes={}, identity="user-1729880000", kind=rtc.ParticipantKind.PARTICIPANT_KIND_STANDARD)
+    room = MagicMock(remote_participants={"p": web_user})
+    room.name = "call-1729880000"
+    assert get_sip_caller_phone(room) is None
+
+    sip_caller = MagicMock(attributes={}, identity="+18455550199", kind=rtc.ParticipantKind.PARTICIPANT_KIND_SIP)
+    sip_room = MagicMock(remote_participants={"p": sip_caller})
+    sip_room.name = "regular_room"
+    assert get_sip_caller_phone(sip_room) == "+18455550199"
+
+
 @pytest.mark.asyncio
 async def test_tool_book_appointment_with_explicit_phone():
     mock_ctx = MagicMock()
@@ -399,7 +553,7 @@ async def test_tool_book_appointment_with_explicit_phone():
         mock_ctx,
         patient_name="Alex Mercer",
         patient_phone="+18453334444",
-        slot_time="2026-10-18T11:00:00",
+        slot_time=f"{FUTURE_ISO}T11:00:00",
     )
     assert "Alex Mercer" in result
     assert "confirmed" in result.lower()
@@ -412,27 +566,9 @@ async def test_tool_book_appointment_rejects_invalid_phone():
         mock_ctx,
         patient_name="Alex Mercer",
         patient_phone="not-a-number",
-        slot_time="2026-10-18T11:00:00",
+        slot_time=f"{FUTURE_ISO}T11:00:00",
     )
     assert "valid phone number is required" in result.lower()
-
-
-@pytest.mark.asyncio
-async def test_tool_send_confirmation_sms_requires_valid_phone():
-    mock_ctx = MagicMock()
-    res_valid = await send_confirmation_sms(
-        mock_ctx,
-        patient_phone="+18453334444",
-        appointment_summary="October 18th at 11 AM",
-    )
-    assert "confirmation" in res_valid.lower()
-
-    res_invalid = await send_confirmation_sms(
-        mock_ctx,
-        patient_phone="123",
-        appointment_summary="October 18th at 11 AM",
-    )
-    assert "valid phone number is required" in res_invalid.lower()
 
 
 @pytest.mark.asyncio
@@ -446,7 +582,7 @@ async def test_tool_transfer_to_human_success():
     mock_participant.kind = rtc.ParticipantKind.PARTICIPANT_KIND_STANDARD
     mock_job_ctx.room.remote_participants = {"p1": mock_participant}
 
-    mock_run_ctx.userdata = {"job_ctx": mock_job_ctx}
+    mock_run_ctx.userdata = CallUserdata(trace_id="t", job_ctx=mock_job_ctx)
 
     res = await transfer_to_human(mock_run_ctx, reason="caller requested real person")
     mock_run_ctx.disallow_interruptions.assert_called_once()
@@ -476,7 +612,7 @@ async def test_tool_transfer_to_human_handles_sip_error():
     mock_participant.identity = "sip_caller_test"
     mock_job_ctx.room.remote_participants = {"p1": mock_participant}
 
-    mock_run_ctx.userdata = {"job_ctx": mock_job_ctx}
+    mock_run_ctx.userdata = CallUserdata(trace_id="t", job_ctx=mock_job_ctx)
 
     res = await transfer_to_human(mock_run_ctx)
     assert "unable to transfer" in res.lower()
@@ -485,6 +621,58 @@ async def test_tool_transfer_to_human_handles_sip_error():
 @pytest.mark.asyncio
 async def test_tool_transfer_to_human_standalone_mode():
     mock_run_ctx = MagicMock()
-    mock_run_ctx.userdata = {}
+    mock_run_ctx.userdata = CallUserdata(trace_id="t")
     res = await transfer_to_human(mock_run_ctx)
     assert "transferring you" in res.lower()
+
+
+@pytest.mark.asyncio
+async def test_booking_fails_on_database_error(monkeypatch):
+    cal = CalendarService()
+
+    def broken_connect():
+        raise sqlite3.OperationalError("disk I/O error")
+
+    monkeypatch.setattr(cal, "_connect", broken_connect)
+    res = await cal.book_slot(f"{FUTURE_ISO}T10:00:00", "Alice Walker", "+15551112222")
+    assert res["success"] is False
+    assert "temporary" in res["error"].lower()
+
+
+@pytest.mark.asyncio
+async def test_tool_book_appointment_records_booking():
+    ctx = MagicMock()
+    ctx.userdata = CallUserdata(trace_id="t")
+    await book_appointment(ctx, patient_name=" Sarah Connor ", patient_phone="(555) 333-2222", slot_time=f"{FUTURE_ISO}T10:30:00")
+    assert ctx.userdata.last_booking == BookingRecord(
+        patient_name="Sarah Connor", patient_phone="+15553332222", slot_time=f"{FUTURE_ISO}T10:30:00"
+    )
+
+
+@pytest.mark.asyncio
+async def test_tool_check_availability_rejects_past_date():
+    res = await check_availability(MagicMock(), preferred_date="2020-01-06")
+    assert "past dates" in res.lower()
+
+
+@pytest.mark.asyncio
+async def test_tool_transfer_records_outcome():
+    job_ctx = MagicMock()
+    caller = MagicMock(identity="sip_caller", kind=rtc.ParticipantKind.PARTICIPANT_KIND_SIP)
+    job_ctx.room.remote_participants = {"p1": caller}
+
+    job_ctx.transfer_sip_participant = AsyncMock(return_value=None)
+    ctx = MagicMock()
+    ctx.userdata = CallUserdata(trace_id="t", job_ctx=job_ctx)
+    await transfer_to_human(ctx, reason="billing question")
+    assert ctx.userdata.last_transfer.transferred is True
+    assert ctx.userdata.last_transfer.reason == "billing question"
+
+    job_ctx.transfer_sip_participant = AsyncMock(side_effect=RuntimeError("SIP 486 Busy Here"))
+    await transfer_to_human(ctx)
+    assert ctx.userdata.last_transfer.transferred is False
+
+    job_ctx.room.remote_participants = {}
+    res = await transfer_to_human(ctx)
+    assert "unable to transfer" in res.lower()
+    assert ctx.userdata.last_transfer.transferred is False

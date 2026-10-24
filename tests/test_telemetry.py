@@ -1,5 +1,12 @@
-from unittest.mock import ANY, MagicMock, patch
+from types import SimpleNamespace
+from unittest.mock import MagicMock, patch
 import pytest
+
+from langfuse import Langfuse
+from opentelemetry import trace as trace_api
+from opentelemetry.sdk.trace import TracerProvider
+from opentelemetry.sdk.trace.export import SimpleSpanProcessor
+from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
 
 from telemetry import TelemetryManager
 
@@ -19,18 +26,42 @@ def test_telemetry_create_session_trace():
     mock_trace = MagicMock()
     mock_client.start_observation.return_value = mock_trace
 
-    with patch.object(tm, "get_client", return_value=mock_client):
-        trace = tm.create_session_trace("room_abc_789", participant_id="caller_456")
-        assert trace is mock_trace
-        mock_client.start_observation.assert_called_once_with(
-            name="inbound_call",
-            trace_context={"trace_id": ANY},
-            metadata={
-                "room_name": "room_abc_789",
-                "clinic_name": "Dr. Smith's Clinic",
-            },
-        )
-        assert tm._active_traces.get("room_abc_789") is mock_trace
+    with patch.object(tm, "get_client", return_value=mock_client), \
+         patch("telemetry.propagate_attributes") as propagate:
+        trace = tm.create_session_trace("room_abc_789", room_sid="RM_1")
+
+    assert trace is mock_trace
+    mock_client.start_observation.assert_called_once_with(
+        name="inbound_call",
+        trace_context={"trace_id": Langfuse.create_trace_id(seed="room_abc_789")},
+    )
+    propagate.assert_called_once_with(
+        trace_name="inbound_call",
+        session_id="room_abc_789",
+        metadata={"clinic_name": "Dr. Smith's Clinic", "room_sid": "RM_1"},
+    )
+    assert "user_id" not in propagate.call_args.kwargs
+    assert tm._active_traces.get("room_abc_789") is mock_trace
+
+
+def test_langfuse_and_livekit_share_one_provider_exporting_all_spans():
+    tm = TelemetryManager()
+    with patch("telemetry.settings.LANGFUSE_PUBLIC_KEY", "pk"), \
+         patch("telemetry.settings.LANGFUSE_SECRET_KEY", "sk"), \
+         patch("telemetry.Langfuse") as langfuse_cls, \
+         patch("telemetry.set_tracer_provider") as set_provider:
+        assert tm.get_client() is langfuse_cls.return_value
+        tm.get_client()
+
+    langfuse_cls.assert_called_once()
+    kwargs = langfuse_cls.call_args.kwargs
+    provider = kwargs["tracer_provider"]
+    set_provider.assert_called_once_with(provider)
+    assert provider.resource.attributes["langfuse.environment"] == "test"
+    livekit_span = MagicMock(instrumentation_scope=MagicMock(), attributes={})
+    livekit_span.instrumentation_scope.name = "livekit-agents"
+    assert kwargs["should_export_span"](livekit_span) is True
+    assert kwargs["additional_headers"] == {"x-langfuse-ingestion-version": "4"}
 
 
 @pytest.mark.asyncio
@@ -45,3 +76,50 @@ async def test_telemetry_flush_non_blocking():
         mock_trace.end.assert_called_once()
         mock_client.flush.assert_called_once()
         assert "room_abc_789" not in tm._active_traces
+
+
+def test_telemetry_guardrail_score_attaches_to_call_trace():
+    tm = TelemetryManager()
+    mock_client = MagicMock()
+    with patch.object(tm, "get_client", return_value=mock_client):
+        tm.record_guardrail_event("room_abc_789", "input_guardrail_blocked", {"reason": "prompt_injection"})
+
+    kwargs = mock_client.create_score.call_args.kwargs
+    assert kwargs["name"] == "guardrail_intervention"
+    assert kwargs["trace_id"] == Langfuse.create_trace_id(seed="room_abc_789")
+
+
+def test_spans_started_under_root_join_the_root_trace():
+    tm = TelemetryManager()
+    root_trace_id = Langfuse.create_trace_id(seed="room_abc_789")
+    tm._active_traces["room_abc_789"] = SimpleNamespace(trace_id=root_trace_id, id="00f067aa0ba902b7")
+
+    exporter = InMemorySpanExporter()
+    provider = TracerProvider()
+    provider.add_span_processor(SimpleSpanProcessor(exporter))
+    livekit_like_tracer = provider.get_tracer("livekit-agents")
+
+    with trace_api.use_span(tm.otel_parent_span("room_abc_789"), end_on_exit=False):
+        with livekit_like_tracer.start_as_current_span("llm_request"):
+            pass
+
+    (span,) = exporter.get_finished_spans()
+    assert format(span.context.trace_id, "032x") == root_trace_id
+    assert format(span.parent.span_id, "016x") == "00f067aa0ba902b7"
+
+
+def test_otel_parent_span_absent_without_root():
+    tm = TelemetryManager()
+    assert tm.otel_parent_span("unknown_room") is None
+    tm._active_traces["bad_room"] = SimpleNamespace(trace_id=None, id=None)
+    assert tm.otel_parent_span("bad_room") is None
+
+
+@pytest.mark.asyncio
+async def test_telemetry_trace_released_after_flush():
+    tm = TelemetryManager()
+    mock_client = MagicMock()
+    with patch.object(tm, "get_client", return_value=mock_client):
+        tm.create_session_trace("room_abc_789", room_sid="RM_sid_1")
+        await tm.flush("room_abc_789")
+    assert tm._active_traces == {}

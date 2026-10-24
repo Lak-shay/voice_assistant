@@ -81,7 +81,7 @@ An automated inbound telephone voice agent for healthcare clinic reception opera
 
 ### 5. Telemetry & Non-Blocking Logging
 * **Langfuse v4:** Session traces are anchored to the LiveKit room name (`trace_id`). Tracks turn latencies, tool execution durations, token costs, and interruption counts.
-* **Decoupled Queue Logging (`logger.py`):** Logs use `QueueHandler` on the main loop and `QueueListener` on a dedicated worker thread to prevent thread contention or I/O stalls during WebRTC audio processing.
+* **Logging (`logger.py`):** Standard Python loggers that propagate to the handlers LiveKit installs. In each job process LiveKit queues records and ships them to the parent on a background thread, so logging never stalls audio. Every call's lines carry LiveKit's `room` (the trace ID), `job_id`, and `pid`, plus `room_sid` and `participant_id` from `bind_call_context`. Pre-worker code (startup checks, scripts) uses `standalone_logging()`.
 
 ---
 
@@ -103,12 +103,16 @@ To maintain natural conversational rhythm over telephone networks, the end-to-en
 
 ```
 voice_assistant/
-├── agent.py                 # LiveKit worker entrypoint, agent loop, and lifecycle handlers
+├── agent.py                 # LiveKit worker entrypoint, agent class, and session wiring
+├── prompts.py               # Receptionist system prompt and greeting
+├── session_state.py         # Typed per-call userdata (CallUserdata, BookingRecord, TransferRecord)
+├── clinic_time.py           # Clinic timezone and natural-language date/slot parsing
 ├── config.py                # Pydantic-settings configuration loading (.env.dev / .env.prod)
-├── logger.py                # Decoupled QueueHandler / QueueListener logging architecture
+├── logger.py                # Standard loggers with per-call fields; stdout handler for pre-worker scripts
 ├── startup.py               # Pre-flight health checks (LiveKit, Langfuse, Calendar, Telnyx)
-├── telemetry.py             # Langfuse v4 trace setup and metrics recording
-├── requirements.txt         # Core dependencies with pinned version ranges
+├── telemetry.py             # Langfuse v4 trace setup and guardrail scores
+├── requirements.txt         # Runtime dependencies with pinned version ranges
+├── requirements-dev.txt     # Runtime dependencies plus pytest
 ├── Dockerfile               # Production container image definition
 ├── pytest.ini               # Pytest configuration
 ├── .env.example             # Environment variable template
@@ -119,18 +123,25 @@ voice_assistant/
 │   └── tool_guardrails.py   # Parameter validation for names, dates, and phone numbers
 ├── tools/
 │   ├── appointment_tools.py # LiveKit @function_tool declarations
-│   ├── calendar_service.py  # Google Calendar API client and in-memory mock backend
-│   └── sms_service.py       # Telnyx REST SMS client and E.164 number sanitizer
+│   ├── calendar_service.py  # Slot availability and booking (SQLite reservations, Google Calendar mirror)
+│   ├── phone.py             # E.164 sanitizer and SIP caller ID resolution
+│   ├── sms_service.py       # Telnyx REST SMS client
+│   └── speech_format.py     # Spoken date and time formatting for TTS
 ├── simulations/
+│   ├── assertions.py        # on_simulation_end checks against scenario expectations
+│   ├── clean_calendar.py    # Resets test reservations before a simulation run
 │   ├── scenarios.yaml       # Conversational test scenarios (booking, transfer, triage)
 │   ├── scenarios_contention.yaml # High-concurrency booking contention scenarios
 │   └── simulate.ps1         # PowerShell simulation runner script
 └── tests/
+    ├── conftest.py          # Forces mock backends and an isolated bookings DB
     ├── test_agent_pipeline.py
+    ├── test_clinic_time.py
     ├── test_guardrails_emergency.py
     ├── test_guardrails_input.py
     ├── test_guardrails_output.py
     ├── test_guardrails_tools.py
+    ├── test_logger.py
     ├── test_startup.py
     ├── test_telemetry.py
     └── test_tools.py
@@ -179,63 +190,7 @@ Copy the example configuration to your target environment file:
 cp .env.example .env.dev
 ```
 
-Edit `.env.dev` with your credentials:
-
-```ini
-# Application Environment (dev | prod)
-APP_ENV=dev
-
-# LiveKit Cloud
-LIVEKIT_URL=wss://<your-project>.livekit.cloud
-LIVEKIT_API_KEY=your_livekit_api_key
-LIVEKIT_API_SECRET=your_livekit_api_secret
-
-# Observability & Tracing (Langfuse)
-LANGFUSE_PUBLIC_KEY=pk-lf-...
-LANGFUSE_SECRET_KEY=sk-lf-...
-LANGFUSE_BASE_URL=https://cloud.langfuse.com
-
-# Telephony (Telnyx SIP & Carrier Failover)
-TELNYX_API_KEY=your_telnyx_api_key
-TELNYX_PHONE_NUMBER=+15550001111
-CLINIC_FAILOVER_PHONE=+15551234567
-SIP_TRUNK_ID=your_sip_trunk_id
-
-# LiveKit Inference Models
-STT_PROVIDER=deepgram
-STT_MODEL=nova-3
-LLM_PROVIDER=openai
-LLM_MODEL=gpt-4o-mini
-TTS_PROVIDER=cartesia
-TTS_MODEL=sonic-3
-TTS_VOICE_ID=9626c31c-bec5-4cca-baa8-f8ba9e84c8bc
-
-# Silero VAD & Turn Tuning
-VAD_MIN_SPEECH_DURATION=0.05
-VAD_MIN_SILENCE_DURATION=0.40
-
-# Clinic Operations & Booking
-CLINIC_NAME="Dr. Smith's Clinic"
-CLINIC_TIMEZONE=America/New_York
-APPOINTMENT_DEFAULT_DURATION_MINUTES=30
-
-# Integrations (mock | google for calendar, mock | telnyx for sms)
-CALENDAR_BACKEND=mock
-CALENDAR_API_KEY=
-CALENDAR_ID=
-SMS_BACKEND=mock
-
-# Health Checks & Concurrency
-STARTUP_CHECK_TIMEOUT=8.0
-NUM_IDLE_PROCESSES=10
-
-# Guardrails
-GUARDRAILS_ENABLED=true
-GUARDRAILS_MAX_BOOKING_DAYS_AHEAD=60
-GUARDRAILS_EMERGENCY_TRIAGE_ENABLED=true
-GUARDRAILS_INJECTION_DEFENSE_ENABLED=true
-GUARDRAILS_TTS_SANITIZER_ENABLED=true
-```
+Edit `.env.dev` with your credentials. Every key is documented in `.env.example`; the LiveKit, Langfuse, Telnyx, model, and clinic keys are required. Clinic hours, slot interval, period boundaries, timeouts, `LOG_LEVEL`, and `BOOKINGS_DB_PATH` have defaults and only need setting to override them. When a key is added to `config.py`, add it to `.env.example`, `.env.dev`, and `.env.prod` too.
 
 ---
 
@@ -278,8 +233,11 @@ docker run --env-file .env.prod --rm clinic-voice-assistant
 The test suite validates agent instructions, guardrails, calendar concurrency locks, SIP transfer logic, and telemetry handling:
 
 ```bash
+pip install -r requirements-dev.txt
 pytest -v
 ```
+
+`tests/conftest.py` forces mock calendar and SMS backends and a throwaway bookings database, so the suite needs no `.env` file and never touches dev bookings.
 
 ### Synthetic Caller Simulations
 Simulate multi-turn caller conversations against defined scenarios using the LiveKit CLI:

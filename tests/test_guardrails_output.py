@@ -5,18 +5,7 @@ import pytest
 from guardrails.output_guardrails import (
     mask_secrets_transform,
     mask_sensitive_secrets,
-    scrub_markdown,
 )
-
-
-def test_scrub_markdown():
-    text = "**Welcome** to *our* clinic! Please visit https://example.com/clinic for #appointments."
-    cleaned = scrub_markdown(text)
-    assert "**" not in cleaned
-    assert "*" not in cleaned
-    assert "#" not in cleaned
-    assert "https://" not in cleaned
-    assert "Welcome to our clinic!" in cleaned
 
 
 def test_mask_sensitive_secrets():
@@ -39,4 +28,14 @@ async def test_mask_secrets_transform():
     assert "sk-lf-secret" not in result
     assert "[REDACTED]" in result
     assert "and keep it safe." in result
+
+
+@pytest.mark.asyncio
+async def test_mask_secrets_transform_masks_secret_split_across_chunks():
+    async def token_stream():
+        for token in ["Your key is sk", "-lf-ab", "c123456", "789 and ", "LANGFUSE_SECRET", "_KEY is set."]:
+            yield token
+
+    result = "".join([c async for c in mask_secrets_transform(token_stream())])
+    assert result == "Your key is [REDACTED] and [REDACTED] is set."
 

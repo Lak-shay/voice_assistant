@@ -76,14 +76,14 @@ The worker runs inside a Docker container (or local process) executing an asynch
 
 * **`@function_tool` Decorators:** Encapsulates business logic. Tools execute asynchronously so the main WebRTC loop is never blocked:
 * **`check_availability`:** Queries open slots via Google Calendar API (`freebusy.query`), grouping openings into morning, afternoon, and evening periods.
-* **`book_appointment`:** Protected by an atomic multithreading mutex lock (`_write_lock`). Performs an on-calendar verification (`freebusy.query`) to ensure the slot was not taken, then creates the calendar event (`events().insert`) before confirming.
+* **`book_appointment`:** Reserves the slot with an insert into the SQLite `booked_slots` table, whose primary key on `slot_time` rejects a second booking of the same slot from any worker process. With the Google backend it then re-checks `freebusy.query` and creates the event (`events().insert`), rolling the reservation back if either step fails.
 * **`send_confirmation_sms`:** Dispatches post-booking confirmation SMS via Telnyx REST API (`/v2/messages`).
 * **`transfer_to_human`:** Initiates a cold SIP transfer via LiveKit (`job_ctx.transfer_sip_participant`) using SIP REFER to forward callers to the clinic's physical front desk (`CLINIC_FAILOVER_PHONE`).
 
 #### 5. Observability & Telemetry (Langfuse v4)
 
 * **Observations-First Data Model:** Every call session establishes a root observation in Langfuse v4 correlated with the LiveKit room name (`trace_id`), propagating session ID and context via `propagate_attributes`.
-* **OTLP Direct Ingestion:** OpenTelemetry spans are exported with header `x-langfuse-ingestion-version: 4` to `/api/public/otel/v1/traces`, avoiding legacy dual-write delay and mapping directly to the v4 events model.
+* **One Tracer Provider:** The Langfuse client and LiveKit share a single OpenTelemetry `TracerProvider`, exported by Langfuse's span processor (with `should_export_span` widened so LiveKit's session, turn, STT and TTS spans are kept) to `/api/public/otel/v1/traces` with header `x-langfuse-ingestion-version: 4`. LiveKit's spans are parented to the root observation, so each call is one trace.
 * **Metrics Captured:**
   * Turn-by-turn latency (STT duration, LLM TTFT, TTS playback start).
   * Audio interruption counts (measuring how often patients cut the agent off).

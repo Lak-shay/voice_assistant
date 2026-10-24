@@ -16,12 +16,13 @@
 - **Telemetry Propagation (Langfuse):**
   - Initialize the root observation at session start via Langfuse v4 (`client.start_observation(name="inbound_call", trace_context={"trace_id": trace_id_hex}, ...)`) with client-side attribute propagation (`propagate_attributes(trace_name="inbound_call", session_id=trace_id, ...)`).
   - All subsequent turns, speech synthesis events, and tool executions must nest under this root trace using child observations/generations.
-- **Log Correlation:** Every standard library or `structlog` output line MUST prefix the root identifier (`[%(trace_id)s]`) so concurrent calls can be filtered independently in stdout.
+- **Log Correlation:** Every log line from a call MUST carry the root identifier so concurrent calls can be filtered independently. Inside a worker, LiveKit stamps each job-process record with `room` (the room name, i.e. the `trace_id`), `job_id`, and `pid`; filter on `room`. Do not re-add the trace ID by hand.
 
 ## 4. Real-Time Logging & Diagnostic Rules
-- **Decoupled Queue-Backed Output:** All application logging MUST use `logging.handlers.QueueHandler` on the main thread pushing to an in-memory queue, paired with a background `logging.handlers.QueueListener` worker thread dispatching to `sys.stdout`. Direct synchronous stream writes (`StreamHandler(sys.stdout)`) and file-writing handlers (`FileHandler`) on the event loop thread are strictly prohibited because they acquire thread locks and execute synchronous I/O.
-- **Centralized Logger Architecture:** All pipeline modules, tools, and startup scripts MUST import the shared non-blocking logger from `logger.py` (`get_logger`) rather than attaching ad-hoc handlers.
-- **Structured Fields:** Include `trace_id`, `room_sid`, and `participant_id` in log records where available.
+- **LiveKit-Owned, Non-Blocking Output:** Inside a worker, `cli.run_app` owns logging. Each job process has a queue handler on the root logger whose background thread ships records to the parent, where another thread formats them (colored in dev, JSON in prod) and writes stdout, so logging never blocks the event loop. Application loggers MUST propagate to the root and MUST NOT attach their own handlers; `StreamHandler`, `FileHandler`, or `propagate = False` on app loggers are prohibited because they bypass that pipeline and LiveKit's log export.
+- **Centralized Logger Architecture:** All pipeline modules, tools, and startup scripts MUST get their logger from `logger.py` (`logger`, `startup_logger`, or `get_logger(name)`), which are standard loggers carrying the call-context filter.
+- **Pre-Worker Output:** Code that runs outside a worker (startup checks, `simulations/` scripts) wraps its work in `with standalone_logging():`, a temporary stdout handler that is removed before `cli.run_app` starts. It writes synchronously and is not allowed inside a job.
+- **Structured Fields:** Records carry `room`, `job_id`, and `pid` from LiveKit, plus `room_sid` and `participant_id` from `logger.bind_call_context(...)`, called once per call in the entrypoint. Pass other structured data via `extra=`; never hand-prefix IDs into log messages.
 - **Log Level Discipline:**
   - `DEBUG`: Raw audio frame events, VAD silence thresholds, and interim partial transcripts.
   - `INFO`: Room connection lifecycle (`ctx.connect`), finalized transcripts, tool invocation starts/completions.
@@ -33,9 +34,9 @@
 - **Formatting Filter:** Never emit Markdown formatting syntax (no `**bold**`, `*italics*`, markdown bullets, code blocks, or raw web URLs). Cartesia TTS will verbalize markdown characters literally.
 - **Phonetic Output:** Format numbers, dates, times, and phone numbers phonetically for the speech synthesis model (e.g., "September eighth at two thirty PM" instead of "09/08 2:30pm").
 
-## 6. Tool Calling Rules (`llm.FunctionContext`)
+## 6. Tool Calling Rules (`@function_tool`)
 - Keep active tool sets minimal (3–5 single-responsibility tools per conversational phase).
-- Inherit from `livekit.agents.llm.FunctionContext` and decorate methods with `@llm.ai_callable()`.
+- Declare tools as async functions decorated with `@function_tool()` from `livekit.agents`, taking `context: RunContext[CallUserdata]` as the first parameter. Per-call state lives on the typed `CallUserdata` dataclass (`session_state.py`), never in untyped dicts.
 - Annotate all tool arguments using `typing.Annotated` with explicit parameter descriptions so the LLM infers correct types.
 - Tools must catch exceptions internally and return plain-English error strings rather than throwing unhandled exceptions that crash the WebRTC worker.
 

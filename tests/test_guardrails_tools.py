@@ -52,3 +52,20 @@ def test_validate_booking_date_range():
     valid, err = validate_booking_date_range("2027-01-15", reference_date=ref_date)
     assert valid is False
     assert "days in advance" in err.lower()
+
+
+def test_validate_patient_phone_international():
+    valid, phone, _ = validate_patient_phone("+44 20 7946 0958")
+    assert valid is True
+    assert phone == "+442079460958"
+
+    valid, _, err = validate_patient_phone("+44 0000000000")
+    assert valid is False
+    assert "invalid" in err.lower()
+
+
+def test_validate_booking_date_range_ignores_calendar_backend(monkeypatch):
+    monkeypatch.setattr("guardrails.tool_guardrails.settings.CALENDAR_BACKEND", "mock")
+    valid, err = validate_booking_date_range(datetime.date(2020, 1, 6))
+    assert valid is False
+    assert "past dates" in err.lower()

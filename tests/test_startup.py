@@ -224,7 +224,7 @@ async def test_check_calendar_google_success(mock_settings):
     mock_fb.execute.return_value = {"calendars": {"primary": {"busy": []}}}
     mock_google.freebusy.return_value.query.return_value = mock_fb
 
-    with patch("tools.calendar_service.CalendarService._get_google_service", return_value=mock_google):
+    with patch("tools.calendar_service.CalendarService.get_google_service", return_value=mock_google):
         ok, msg = await check_calendar_connection(mock_settings)
         assert ok is True
         assert "Connected to Google Calendar API" in msg
@@ -239,7 +239,7 @@ async def test_check_calendar_google_failure(mock_settings):
     mock_google = MagicMock()
     mock_google.freebusy.return_value.query.return_value.execute.side_effect = RuntimeError("Google API network timeout")
 
-    with patch("tools.calendar_service.CalendarService._get_google_service", return_value=mock_google):
+    with patch("tools.calendar_service.CalendarService.get_google_service", return_value=mock_google):
         ok, msg = await check_calendar_connection(mock_settings)
         assert ok is False
         assert "failed" in msg.lower()

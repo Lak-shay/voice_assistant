@@ -31,6 +31,11 @@ def test_input_guardrail_blocks_medical_advice():
         assert "medical advice" in result.response_text.lower()
 
 
+def test_medical_advice_check_can_be_disabled():
+    result = check_input_guardrails("Can you prescribe me some antibiotics?", check_medical_advice=False)
+    assert result.is_blocked is False
+
+
 def test_input_guardrail_allows_normal_dialogue():
     normal_inputs = [
         "Hi, I want to see if Dr. Smith has any open slots this Thursday.",

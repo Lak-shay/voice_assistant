@@ -44,6 +44,7 @@ def check_input_guardrails(
     user_text: str,
     check_emergency: bool = True,
     check_injection: bool = True,
+    check_medical_advice: bool = True,
 ) -> InputGuardrailResult:
     if not user_text:
         return InputGuardrailResult(is_blocked=False)
@@ -68,12 +69,13 @@ def check_input_guardrails(
                     response_text=INJECTION_REFUSAL_TEXT,
                 )
 
-    for pattern in COMPILED_MEDICAL_ADVICE:
-        if pattern.search(text):
-            return InputGuardrailResult(
-                is_blocked=True,
-                reason="out_of_scope_medical_advice",
-                response_text=MEDICAL_ADVICE_REFUSAL_TEXT,
-            )
+    if check_medical_advice:
+        for pattern in COMPILED_MEDICAL_ADVICE:
+            if pattern.search(text):
+                return InputGuardrailResult(
+                    is_blocked=True,
+                    reason="out_of_scope_medical_advice",
+                    response_text=MEDICAL_ADVICE_REFUSAL_TEXT,
+                )
 
     return InputGuardrailResult(is_blocked=False)
