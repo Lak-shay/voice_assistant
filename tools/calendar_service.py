@@ -26,8 +26,13 @@ PERIODS = ("morning", "afternoon", "evening")
 
 SLOT_TAKEN_ERROR = "This slot was just taken. Please select another open time."
 TEMPORARY_BOOKING_ERROR = "A temporary booking error occurred. Please try again."
+NOT_A_SLOT_ERROR = "That time is not one of our open appointment slots. Please choose one of the offered times."
 
 BusyInterval = tuple[datetime.datetime, datetime.datetime]
+
+
+class CalendarUnavailableError(Exception):
+    """Google Calendar could not be reached, so busy times are unknown."""
 
 
 def classify_period(slot_iso: str) -> str:
@@ -55,7 +60,6 @@ class CalendarService:
 
     def __init__(self, db_path: str | None = None) -> None:
         self._google_service: Any = None
-        self._google_init_attempted = False
         self._google_init_lock = threading.Lock()
         self._db_path = db_path or settings.BOOKINGS_DB_PATH
         self._init_db()
@@ -119,11 +123,11 @@ class CalendarService:
             return set()
 
     def get_google_service(self) -> Any:
-        """Lazily build the Google Calendar client. Blocking (reads credentials); call via asyncio.to_thread."""
+        """Lazily build the Google Calendar client; a failed build is retried on the next call.
+        Blocking (reads credentials); call via asyncio.to_thread."""
         with self._google_init_lock:
-            if self._google_service is not None or self._google_init_attempted:
+            if self._google_service is not None:
                 return self._google_service
-            self._google_init_attempted = True
 
             if not GOOGLE_CLIENT_AVAILABLE or settings.CALENDAR_BACKEND != "google":
                 return None
@@ -162,10 +166,10 @@ class CalendarService:
         )
 
     def _sync_query_google_busy(self, time_min: datetime.datetime, time_max: datetime.datetime) -> list[BusyInterval]:
-        """Blocking freebusy query. Returns [] when Google is not configured or the query fails."""
+        """Blocking freebusy query. Raises CalendarUnavailableError when busy times cannot be determined."""
         service = self.get_google_service()
         if not service:
-            return []
+            raise CalendarUnavailableError("Google Calendar client is not available")
 
         cal_id = self.calendar_id
         body = {
@@ -178,7 +182,7 @@ class CalendarService:
             res = service.freebusy().query(body=body).execute()
         except Exception as exc:
             logger.error("Failed to query Google Calendar freebusy: %s", exc)
-            return []
+            raise CalendarUnavailableError(str(exc)) from exc
 
         calendars = res.get("calendars", {})
         cal_data = calendars.get(cal_id)
@@ -186,9 +190,11 @@ class CalendarService:
         if not cal_data and len(calendars) == 1:
             cal_data = next(iter(calendars.values()))
         if not cal_data:
-            return []
+            logger.error("Google Calendar freebusy response has no entry for calendar %s", cal_id)
+            raise CalendarUnavailableError(f"No freebusy data for calendar {cal_id}")
         if "errors" in cal_data:
             logger.error("Google Calendar freebusy returned errors for calendar %s: %s", cal_id, cal_data["errors"])
+            raise CalendarUnavailableError(f"Freebusy errors for calendar {cal_id}")
 
         tz = clinic_tz()
         busy: list[BusyInterval] = []
@@ -216,17 +222,26 @@ class CalendarService:
         else:
             db_booked, google_busy = await db_task, []
 
+        duration = datetime.timedelta(minutes=settings.APPOINTMENT_DEFAULT_DURATION_MINUTES)
+        return [
+            slot_dt.strftime("%Y-%m-%dT%H:%M:00")
+            for slot_dt in self._bookable_starts(target_date)
+            if slot_dt.strftime("%Y-%m-%dT%H:%M:00") not in db_booked
+            and not _overlaps(slot_dt, slot_dt + duration, google_busy)
+        ]
+
+    def _bookable_starts(self, target_date: datetime.date) -> list[datetime.datetime]:
+        """Future slot start times on the clinic's grid for target_date, ignoring existing bookings."""
+        day_start, day_end = self._clinic_day_bounds(target_date)
         now = datetime.datetime.now(day_start.tzinfo)
         step = datetime.timedelta(minutes=settings.SLOT_INTERVAL_MINUTES)
-        duration = datetime.timedelta(minutes=settings.APPOINTMENT_DEFAULT_DURATION_MINUTES)
-        slots: list[str] = []
+        starts: list[datetime.datetime] = []
         slot_dt = day_start
         while slot_dt < day_end:
-            slot_iso = slot_dt.strftime("%Y-%m-%dT%H:%M:00")
-            if slot_dt > now and slot_iso not in db_booked and not _overlaps(slot_dt, slot_dt + duration, google_busy):
-                slots.append(slot_iso)
+            if slot_dt > now:
+                starts.append(slot_dt)
             slot_dt += step
-        return slots
+        return starts
 
     async def get_slots_by_period(self, date_str: str) -> dict[str, list[str]]:
         grouped: dict[str, list[str]] = {p: [] for p in PERIODS}
@@ -312,6 +327,10 @@ class CalendarService:
         service = self.get_google_service()
         if service:
             return self._sync_google_book(service, normalized_slot, patient_name, patient_phone, slot_dt, slot_end)
+        if settings.CALENDAR_BACKEND == "google":
+            logger.error("Google Calendar client unavailable; not booking %s", normalized_slot)
+            self._rollback_slot(normalized_slot)
+            return {"success": False, "error": TEMPORARY_BOOKING_ERROR}
 
         return {
             "success": True,
@@ -329,6 +348,9 @@ class CalendarService:
                 "success": False,
                 "error": "The appointment time could not be understood. Please specify a clear date and time.",
             }
+        if parsed_dt not in self._bookable_starts(parsed_dt.date()):
+            logger.warning("Rejected booking for %s: past, outside clinic hours, or off the slot grid.", parsed_dt.isoformat())
+            return {"success": False, "error": NOT_A_SLOT_ERROR}
         return await asyncio.to_thread(
             self._sync_check_and_book_slot, parsed_dt, patient_name.strip(), patient_phone.strip()
         )

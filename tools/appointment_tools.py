@@ -193,25 +193,18 @@ async def book_appointment(
 
 
 @function_tool()
-async def send_confirmation_sms(
-    context: RunContext[CallUserdata],
-    patient_phone: Annotated[
-        str,
-        Field(description="Phone number to receive the confirmation text (e.g. +1XXXXXXXXXX)"),
-    ],
-    appointment_summary: Annotated[
-        str,
-        Field(description="Plain text summary of the appointment date and time"),
-    ],
-) -> str:
-    """Send an SMS confirmation to the patient."""
-    try:
-        clean_phone = sanitize_e164(patient_phone)
-        if not clean_phone:
-            return "A valid phone number is required to send the confirmation text message."
+async def send_confirmation_sms(context: RunContext[CallUserdata]) -> str:
+    """Text the patient a confirmation of the appointment booked on this call, to the phone number used for that booking."""
+    booking = context.userdata.last_booking
+    if booking is None:
+        return "I can only send a confirmation text after an appointment has been booked on this call."
 
-        message = f"Hello from {settings.CLINIC_NAME}. Your visit is confirmed for {appointment_summary}."
-        res = await sms_service.send_confirmation(clean_phone, message)
+    try:
+        message = (
+            f"Hello from {settings.CLINIC_NAME}. "
+            f"Your visit is confirmed for {format_slot_phonetically(booking.slot_time)}."
+        )
+        res = await sms_service.send_confirmation(booking.patient_phone, message)
         if res.get("success"):
             return "You will receive the confirmation message on your phone shortly."
         return "I booked your appointment, but our text service could not deliver the confirmation message."
