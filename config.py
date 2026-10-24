@@ -89,6 +89,7 @@ class Settings(BaseSettings):
     GUARDRAILS_MAX_BOOKING_DAYS_AHEAD: int = 60
     GUARDRAILS_EMERGENCY_TRIAGE_ENABLED: bool = True
     GUARDRAILS_INJECTION_DEFENSE_ENABLED: bool = True
+    GUARDRAILS_MEDICAL_ADVICE_ENABLED: bool = True
     GUARDRAILS_TTS_SANITIZER_ENABLED: bool = True
 
     model_config = SettingsConfigDict(

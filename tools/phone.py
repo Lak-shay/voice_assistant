@@ -7,7 +7,9 @@ from livekit import rtc
 from config import settings
 from logger import logger
 
-_ROOM_NAME_PHONE = re.compile(r"(\+?\d{10,15})")
+# Only '+'-prefixed numbers, as in LiveKit SIP dispatch room names ('call-_+15551234567_abc'), so that
+# timestamps or other digit runs in room names are never mistaken for caller ID.
+_ROOM_NAME_PHONE = re.compile(r"(\+\d{10,15})")
 
 
 def sanitize_e164(phone: str, default_country_code: str | None = None) -> str | None:
@@ -35,7 +37,7 @@ def _phone_candidates(participant: rtc.Participant) -> list[str]:
     if isinstance(identity, str):
         if identity.startswith("sip_"):
             candidates.append(identity.removeprefix("sip_"))
-        elif not identity.startswith(("playground_", "agent_")):
+        elif getattr(participant, "kind", None) == rtc.ParticipantKind.PARTICIPANT_KIND_SIP:
             candidates.append(identity)
     return candidates
 

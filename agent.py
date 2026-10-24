@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import sys
 
 from livekit import rtc
@@ -9,6 +10,7 @@ from livekit.agents import (
     AgentServer,
     AgentSession,
     JobContext,
+    JobProcess,
     cli,
     inference,
     llm,
@@ -17,6 +19,7 @@ from livekit.agents import (
 from livekit.agents.llm import StopResponse
 from livekit.agents.worker import JobExecutorType
 from livekit.plugins import silero
+from opentelemetry import trace as trace_api
 
 from clinic_time import now_in_clinic
 from config import settings
@@ -46,6 +49,7 @@ def _evaluate_guardrails(user_text: str, userdata: CallUserdata) -> str | None:
         user_text,
         check_emergency=settings.GUARDRAILS_EMERGENCY_TRIAGE_ENABLED,
         check_injection=settings.GUARDRAILS_INJECTION_DEFENSE_ENABLED,
+        check_medical_advice=settings.GUARDRAILS_MEDICAL_ADVICE_ENABLED,
     )
     if not (result.is_blocked and result.response_text):
         return None
@@ -81,9 +85,16 @@ async def _guarded_text_input_cb(sess: AgentSession[CallUserdata], ev: room_io.T
         await sess.interrupt()
         reply = _evaluate_guardrails(ev.text, sess.userdata)
         if reply:
-            sess.generate_reply(instructions=f"Immediately speak this exact message to the user and nothing else: {reply}")
+            sess.say(reply, allow_interruptions=False)
             return
         sess.generate_reply(user_input=ev.text)
+
+
+def _prewarm(proc: JobProcess) -> None:
+    proc.userdata["vad"] = silero.VAD.load(
+        min_speech_duration=settings.VAD_MIN_SPEECH_DURATION,
+        min_silence_duration=settings.VAD_MIN_SILENCE_DURATION,
+    )
 
 
 server = AgentServer(
@@ -93,6 +104,7 @@ server = AgentServer(
     num_idle_processes=settings.NUM_IDLE_PROCESSES,
     job_executor_type=JobExecutorType.PROCESS,
     initialize_process_timeout=settings.PROCESS_INIT_TIMEOUT,
+    setup_fnc=_prewarm,
 )
 
 
@@ -128,10 +140,7 @@ def _build_session(ctx: JobContext, trace_id: str, caller_phone: str | None) -> 
         tts_text_transforms.append(mask_secrets_transform)
 
     return AgentSession(
-        vad=silero.VAD.load(
-            min_speech_duration=settings.VAD_MIN_SPEECH_DURATION,
-            min_silence_duration=settings.VAD_MIN_SILENCE_DURATION,
-        ),
+        vad=ctx.proc.userdata["vad"],
         stt=inference.STT(f"{settings.STT_PROVIDER}/{settings.STT_MODEL}", **credentials),
         llm=inference.LLM(f"{settings.LLM_PROVIDER}/{settings.LLM_MODEL}", **credentials),
         tts=inference.TTS(f"{settings.TTS_PROVIDER}/{settings.TTS_MODEL}", voice=settings.TTS_VOICE_ID, **credentials),
@@ -180,14 +189,18 @@ async def entrypoint(ctx: JobContext) -> None:
     logger.info("Caller phone: %s", caller_phone or "not provided by caller ID")
 
     session = _build_session(ctx, trace_id, caller_phone)
-    await session.start(
-        agent=ClinicReceptionistAgent(caller_phone=caller_phone),
-        room=ctx.room,
-        room_options=room_io.RoomOptions(
-            audio_input=room_io.AudioInputOptions(),
-            text_input=room_io.TextInputOptions(text_input_cb=_guarded_text_input_cb),
-        ),
-    )
+    root_span = telemetry.otel_parent_span(trace_id)
+    # Session tasks copy the current OTel context when they are created, so starting the session
+    # while the root is current makes every turn, LLM, TTS and tool span a child of inbound_call.
+    with trace_api.use_span(root_span, end_on_exit=False) if root_span else contextlib.nullcontext():
+        await session.start(
+            agent=ClinicReceptionistAgent(caller_phone=caller_phone),
+            room=ctx.room,
+            room_options=room_io.RoomOptions(
+                audio_input=room_io.AudioInputOptions(),
+                text_input=room_io.TextInputOptions(text_input_cb=_guarded_text_input_cb),
+            ),
+        )
 
 
 if __name__ == "__main__":

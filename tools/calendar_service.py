@@ -7,7 +7,7 @@ import os
 import sqlite3
 import threading
 import time
-from collections.abc import Iterator
+from collections.abc import Iterable, Iterator
 from contextlib import contextmanager
 from typing import Any
 
@@ -49,6 +49,18 @@ def classify_period(slot_iso: str) -> str:
 
 def _overlaps(start: datetime.datetime, end: datetime.datetime, busy: list[BusyInterval]) -> bool:
     return any(start < b_end and end > b_start for b_start, b_end in busy)
+
+
+def _appointment_duration() -> datetime.timedelta:
+    return datetime.timedelta(minutes=settings.APPOINTMENT_DEFAULT_DURATION_MINUTES)
+
+
+def _booking_intervals(slot_times: Iterable[str]) -> list[BusyInterval]:
+    """Busy intervals for stored reservations, which all last the configured appointment duration."""
+    tz = clinic_tz()
+    duration = _appointment_duration()
+    starts = (datetime.datetime.fromisoformat(s).replace(tzinfo=tz) for s in slot_times)
+    return [(start, start + duration) for start in starts]
 
 
 class CalendarService:
@@ -222,12 +234,12 @@ class CalendarService:
         else:
             db_booked, google_busy = await db_task, []
 
-        duration = datetime.timedelta(minutes=settings.APPOINTMENT_DEFAULT_DURATION_MINUTES)
+        busy = _booking_intervals(db_booked) + google_busy
+        duration = _appointment_duration()
         return [
             slot_dt.strftime("%Y-%m-%dT%H:%M:00")
             for slot_dt in self._bookable_starts(target_date)
-            if slot_dt.strftime("%Y-%m-%dT%H:%M:00") not in db_booked
-            and not _overlaps(slot_dt, slot_dt + duration, google_busy)
+            if not _overlaps(slot_dt, slot_dt + duration, busy)
         ]
 
     def _bookable_starts(self, target_date: datetime.date) -> list[datetime.datetime]:
@@ -310,10 +322,18 @@ class CalendarService:
         patient_phone: str,
     ) -> dict[str, Any]:
         normalized_slot = slot_dt.strftime("%Y-%m-%dT%H:%M:00")
-        slot_end = slot_dt + datetime.timedelta(minutes=settings.APPOINTMENT_DEFAULT_DURATION_MINUTES)
+        slot_end = slot_dt + _appointment_duration()
 
         try:
             with self._connect() as conn:
+                # BEGIN IMMEDIATE takes the write lock before the overlap check, so two processes
+                # cannot both see the range free and then both insert.
+                conn.execute("BEGIN IMMEDIATE")
+                same_day = conn.execute(
+                    "SELECT slot_time FROM booked_slots WHERE slot_time LIKE ?", (f"{slot_dt.date().isoformat()}%",)
+                )
+                if _overlaps(slot_dt, slot_end, _booking_intervals(row[0] for row in same_day)):
+                    return {"success": False, "error": SLOT_TAKEN_ERROR}
                 conn.execute(
                     "INSERT INTO booked_slots (slot_time, patient_name, patient_phone, created_at) VALUES (?, ?, ?, ?)",
                     (normalized_slot, patient_name, patient_phone, time.time()),

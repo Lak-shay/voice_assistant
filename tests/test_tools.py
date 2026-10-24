@@ -286,6 +286,26 @@ async def test_contention_same_slot_fallback_booking():
     assert fallback_res["patient_name"] == failed_caller
 
 
+@pytest.mark.asyncio
+async def test_overlapping_bookings_are_rejected_and_hidden(monkeypatch):
+    monkeypatch.setattr("tools.calendar_service.settings.APPOINTMENT_DEFAULT_DURATION_MINUTES", 60)
+    cal = CalendarService()
+
+    first = await cal.book_slot(f"{FUTURE_ISO}T10:00:00", "Alice Walker", "+15551112222")
+    overlapping = await cal.book_slot(f"{FUTURE_ISO}T10:30:00", "Bob Jones", "+15553334444")
+    adjacent = await cal.book_slot(f"{FUTURE_ISO}T11:00:00", "Cara Diaz", "+15555556666")
+
+    assert first["success"] is True
+    assert overlapping == {"success": False, "error": "This slot was just taken. Please select another open time."}
+    assert adjacent["success"] is True
+
+    slots = await cal.get_all_slots_for_date(FUTURE_ISO)
+    assert f"{FUTURE_ISO}T09:00:00" in slots
+    for hidden in ("09:30", "10:00", "10:30", "11:00", "11:30"):
+        assert f"{FUTURE_ISO}T{hidden}:00" not in slots
+    assert f"{FUTURE_ISO}T12:00:00" in slots
+
+
 def test_parse_flexible_date():
     tz = ZoneInfo("America/New_York")
     base = datetime.datetime.now(tz).date()
@@ -512,6 +532,18 @@ def test_get_sip_caller_phone_scenarios():
     assert get_sip_caller_phone(mock_web_room) is None
 
     assert get_sip_caller_phone(None) is None
+
+
+def test_get_sip_caller_phone_ignores_digit_runs_outside_sip():
+    web_user = MagicMock(attributes={}, identity="user-1729880000", kind=rtc.ParticipantKind.PARTICIPANT_KIND_STANDARD)
+    room = MagicMock(remote_participants={"p": web_user})
+    room.name = "call-1729880000"
+    assert get_sip_caller_phone(room) is None
+
+    sip_caller = MagicMock(attributes={}, identity="+18455550199", kind=rtc.ParticipantKind.PARTICIPANT_KIND_SIP)
+    sip_room = MagicMock(remote_participants={"p": sip_caller})
+    sip_room.name = "regular_room"
+    assert get_sip_caller_phone(sip_room) == "+18455550199"
 
 
 @pytest.mark.asyncio

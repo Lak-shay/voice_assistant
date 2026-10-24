@@ -4,6 +4,7 @@ from typing import Any
 
 from langfuse import Langfuse, propagate_attributes
 from livekit.agents.telemetry import set_tracer_provider
+from opentelemetry import trace as trace_api
 from opentelemetry.exporter.otlp.proto.http.trace_exporter import OTLPSpanExporter
 from opentelemetry.sdk.resources import Resource
 from opentelemetry.sdk.trace import TracerProvider
@@ -101,6 +102,27 @@ class TelemetryManager:
             logger.warning("Failed to attach OpenTelemetry tracer provider: %s", exc)
 
         return trace
+
+    def otel_parent_span(self, trace_id: str) -> trace_api.Span | None:
+        """The call's root observation as an OTel span, for parenting LiveKit's spans under it.
+
+        LiveKit exports through its own TracerProvider, so the root is passed as a non-recording
+        span carrying the root's ids; spans started while it is current join the root's trace.
+        """
+        root = self._active_traces.get(trace_id)
+        if root is None:
+            return None
+        try:
+            span_context = trace_api.SpanContext(
+                trace_id=int(root.trace_id, 16),
+                span_id=int(root.id, 16),
+                is_remote=False,
+                trace_flags=trace_api.TraceFlags(trace_api.TraceFlags.SAMPLED),
+            )
+        except (AttributeError, TypeError, ValueError) as exc:
+            logger.warning("Root observation has no usable OTel ids: %s", exc)
+            return None
+        return trace_api.NonRecordingSpan(span_context)
 
     async def flush(self, trace_id: str | None = None) -> None:
         if trace_id:

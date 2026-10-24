@@ -3,7 +3,8 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 from livekit.agents.llm import StopResponse
 
-from agent import ClinicReceptionistAgent, _guarded_text_input_cb, entrypoint
+from agent import ClinicReceptionistAgent, _guarded_text_input_cb, _prewarm, entrypoint
+from guardrails.emergency import EMERGENCY_RESPONSE_TEXT
 from session_state import BookingRecord, CallUserdata, TransferRecord
 from simulations.assertions import on_simulation_end
 
@@ -45,6 +46,32 @@ async def test_clinic_agent_on_enter_greeting():
     mock_session.generate_reply.assert_awaited_once()
     call_kwargs = mock_session.generate_reply.call_args.kwargs
     assert "How can I help you?" in call_kwargs["instructions"]
+
+
+def test_prewarm_loads_vad_once_per_process():
+    proc = MagicMock(userdata={})
+    with patch("agent.silero.VAD.load", return_value="vad-model") as load:
+        _prewarm(proc)
+    load.assert_called_once()
+    assert proc.userdata["vad"] == "vad-model"
+
+
+@pytest.mark.asyncio
+async def test_entrypoint_uses_prewarmed_vad():
+    mock_ctx = MagicMock()
+    mock_ctx.room.name = "room_test_vad"
+    mock_ctx.connect = AsyncMock()
+    mock_ctx.proc.userdata = {"vad": "prewarmed-vad"}
+    mock_session = MagicMock(start=AsyncMock())
+
+    with patch("agent.telemetry.create_session_trace"), \
+         patch("agent.AgentSession", return_value=mock_session) as session_cls, \
+         patch("agent.silero.VAD.load") as load, \
+         patch("agent.inference.STT"), patch("agent.inference.TTS"), patch("agent.inference.LLM"):
+        await entrypoint(mock_ctx)
+
+    load.assert_not_called()
+    assert session_cls.call_args.kwargs["vad"] == "prewarmed-vad"
 
 
 @pytest.mark.asyncio
@@ -207,6 +234,7 @@ async def test_guarded_text_input_cb_emergency():
     mock_session.interrupt = AsyncMock()
     mock_session.userdata = CallUserdata(trace_id="t")
     mock_session.generate_reply = MagicMock()
+    mock_session.say = MagicMock()
 
     ev = MagicMock()
     ev.text = "Help, I have severe chest pain!"
@@ -214,8 +242,8 @@ async def test_guarded_text_input_cb_emergency():
     await _guarded_text_input_cb(mock_session, ev)
 
     assert mock_session.userdata.last_guardrail == "medical_emergency:chest_pain"
-    mock_session.generate_reply.assert_called_once()
-    assert "911" in mock_session.generate_reply.call_args[1]["instructions"]
+    mock_session.generate_reply.assert_not_called()
+    mock_session.say.assert_called_once_with(EMERGENCY_RESPONSE_TEXT, allow_interruptions=False)
 
 
 @pytest.mark.asyncio
