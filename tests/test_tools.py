@@ -51,6 +51,20 @@ async def test_calendar_service_all_slots():
     assert invalid_slots == []
 
 
+def test_google_credentials_fall_back_to_secrets_mount(monkeypatch, tmp_path):
+    mounted = tmp_path / "missing-credentials.json"
+    mounted.write_text("{}")
+    monkeypatch.setattr("tools.calendar_service.settings.CALENDAR_BACKEND", "google")
+    monkeypatch.setattr("tools.calendar_service.settings.CALENDAR_API_KEY", "missing-credentials.json")
+    monkeypatch.setattr("tools.calendar_service.settings.SECRETS_MOUNT_DIR", str(tmp_path))
+    from_file = MagicMock()
+    monkeypatch.setattr("tools.calendar_service.service_account.Credentials.from_service_account_file", from_file)
+    monkeypatch.setattr("tools.calendar_service.build", MagicMock())
+
+    assert CalendarService().get_google_service() is not None
+    assert from_file.call_args.args[0] == str(mounted)
+
+
 @pytest.mark.asyncio
 async def test_calendar_service_booking_and_conflict():
     cal = CalendarService()

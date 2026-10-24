@@ -71,6 +71,7 @@ class Settings(BaseSettings):
     CALENDAR_BACKEND: str
     CALENDAR_API_KEY: str
     CALENDAR_ID: str
+    SECRETS_MOUNT_DIR: str = "/etc/secrets"
     SMS_BACKEND: str
     BOOKINGS_DB_PATH: str = str(Path(tempfile.gettempdir()) / "voice_assistant_bookings.db")
 

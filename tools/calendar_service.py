@@ -133,6 +133,12 @@ class CalendarService:
                 logger.warning("CALENDAR_BACKEND is 'google' but CALENDAR_API_KEY is not configured.")
                 return None
 
+            # Credential files are kept out of the image; deployed workers receive them as mounted secrets.
+            if not os.path.exists(api_key_or_path):
+                mounted = os.path.join(settings.SECRETS_MOUNT_DIR, os.path.basename(api_key_or_path))
+                if os.path.exists(mounted):
+                    api_key_or_path = mounted
+
             try:
                 if os.path.exists(api_key_or_path):
                     credentials = service_account.Credentials.from_service_account_file(
