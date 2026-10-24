@@ -97,7 +97,6 @@ async def test_entrypoint_orchestration():
         mock_trace.assert_called_once_with(
             trace_id="room_test_12345",
             room_sid="",
-            participant_id=None,
         )
         mock_ctx.add_shutdown_callback.assert_called_once()
         mock_session.start.assert_awaited_once()
@@ -129,7 +128,6 @@ async def test_entrypoint_orchestration_with_room_sid():
         mock_trace.assert_called_once_with(
             trace_id="sim-SRJ_test_12345",
             room_sid="RM_server_room_sid",
-            participant_id=None,
         )
         mock_ctx.add_shutdown_callback.assert_called_once()
         mock_session.start.assert_awaited_once()

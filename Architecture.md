@@ -83,7 +83,7 @@ The worker runs inside a Docker container (or local process) executing an asynch
 #### 5. Observability & Telemetry (Langfuse v4)
 
 * **Observations-First Data Model:** Every call session establishes a root observation in Langfuse v4 correlated with the LiveKit room name (`trace_id`), propagating session ID and context via `propagate_attributes`.
-* **OTLP Direct Ingestion:** OpenTelemetry spans are exported with header `x-langfuse-ingestion-version: 4` to `/api/public/otel/v1/traces`, avoiding legacy dual-write delay and mapping directly to the v4 events model.
+* **One Tracer Provider:** The Langfuse client and LiveKit share a single OpenTelemetry `TracerProvider`, exported by Langfuse's span processor (with `should_export_span` widened so LiveKit's session, turn, STT and TTS spans are kept) to `/api/public/otel/v1/traces` with header `x-langfuse-ingestion-version: 4`. LiveKit's spans are parented to the root observation, so each call is one trace.
 * **Metrics Captured:**
   * Turn-by-turn latency (STT duration, LLM TTFT, TTS playback start).
   * Audio interruption counts (measuring how often patients cut the agent off).

@@ -1,5 +1,5 @@
 from types import SimpleNamespace
-from unittest.mock import ANY, MagicMock, patch
+from unittest.mock import MagicMock, patch
 import pytest
 
 from langfuse import Langfuse
@@ -26,18 +26,42 @@ def test_telemetry_create_session_trace():
     mock_trace = MagicMock()
     mock_client.start_observation.return_value = mock_trace
 
-    with patch.object(tm, "get_client", return_value=mock_client),          patch("telemetry.set_tracer_provider"):
-        trace = tm.create_session_trace("room_abc_789", participant_id="caller_456")
-        assert trace is mock_trace
-        mock_client.start_observation.assert_called_once_with(
-            name="inbound_call",
-            trace_context={"trace_id": ANY},
-            metadata={
-                "room_name": "room_abc_789",
-                "clinic_name": "Dr. Smith's Clinic",
-            },
-        )
-        assert tm._active_traces.get("room_abc_789") is mock_trace
+    with patch.object(tm, "get_client", return_value=mock_client), \
+         patch("telemetry.propagate_attributes") as propagate:
+        trace = tm.create_session_trace("room_abc_789", room_sid="RM_1")
+
+    assert trace is mock_trace
+    mock_client.start_observation.assert_called_once_with(
+        name="inbound_call",
+        trace_context={"trace_id": Langfuse.create_trace_id(seed="room_abc_789")},
+    )
+    propagate.assert_called_once_with(
+        trace_name="inbound_call",
+        session_id="room_abc_789",
+        metadata={"clinic_name": "Dr. Smith's Clinic", "room_sid": "RM_1"},
+    )
+    assert "user_id" not in propagate.call_args.kwargs
+    assert tm._active_traces.get("room_abc_789") is mock_trace
+
+
+def test_langfuse_and_livekit_share_one_provider_exporting_all_spans():
+    tm = TelemetryManager()
+    with patch("telemetry.settings.LANGFUSE_PUBLIC_KEY", "pk"), \
+         patch("telemetry.settings.LANGFUSE_SECRET_KEY", "sk"), \
+         patch("telemetry.Langfuse") as langfuse_cls, \
+         patch("telemetry.set_tracer_provider") as set_provider:
+        assert tm.get_client() is langfuse_cls.return_value
+        tm.get_client()
+
+    langfuse_cls.assert_called_once()
+    kwargs = langfuse_cls.call_args.kwargs
+    provider = kwargs["tracer_provider"]
+    set_provider.assert_called_once_with(provider)
+    assert provider.resource.attributes["langfuse.environment"] == "test"
+    livekit_span = MagicMock(instrumentation_scope=MagicMock(), attributes={})
+    livekit_span.instrumentation_scope.name = "livekit-agents"
+    assert kwargs["should_export_span"](livekit_span) is True
+    assert kwargs["additional_headers"] == {"x-langfuse-ingestion-version": "4"}
 
 
 @pytest.mark.asyncio
@@ -95,7 +119,7 @@ def test_otel_parent_span_absent_without_root():
 async def test_telemetry_trace_released_after_flush():
     tm = TelemetryManager()
     mock_client = MagicMock()
-    with patch.object(tm, "get_client", return_value=mock_client),          patch("telemetry.set_tracer_provider"):
+    with patch.object(tm, "get_client", return_value=mock_client):
         tm.create_session_trace("room_abc_789", room_sid="RM_sid_1")
         await tm.flush("room_abc_789")
     assert tm._active_traces == {}

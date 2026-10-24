@@ -163,7 +163,7 @@ async def entrypoint(ctx: JobContext) -> None:
     bind_call_context(room_sid=room_sid, participant_id=participant_id)
     logger.info("Connected to room (sid=%s). Initializing pipeline...", room_sid)
 
-    telemetry.create_session_trace(trace_id=trace_id, room_sid=room_sid, participant_id=participant_id)
+    telemetry.create_session_trace(trace_id=trace_id, room_sid=room_sid)
 
     async def on_shutdown() -> None:
         logger.info("Call ended. Flushing telemetry...")
