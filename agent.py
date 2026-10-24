@@ -25,7 +25,7 @@ from clinic_time import now_in_clinic
 from config import settings
 from guardrails.input_guardrails import check_input_guardrails
 from guardrails.output_guardrails import mask_secrets_transform
-from logger import bind_call_context, logger
+from logger import bind_call_context, logger, standalone_logging
 from prompts import build_instructions, greeting_instruction
 from session_state import CallUserdata
 from simulations.assertions import on_simulation_end
@@ -153,7 +153,6 @@ def _build_session(ctx: JobContext, trace_id: str, caller_phone: str | None) -> 
 @server.rtc_session(agent_name="clinic-receptionist", on_simulation_end=on_simulation_end)
 async def entrypoint(ctx: JobContext) -> None:
     trace_id = ctx.room.name
-    bind_call_context(trace_id=trace_id)
     logger.info("Inbound call received. Connecting to room...")
     await ctx.connect()
 
@@ -204,8 +203,9 @@ async def entrypoint(ctx: JobContext) -> None:
 
 
 if __name__ == "__main__":
-    if not asyncio.run(run_startup_checks()):
-        logger.error("Startup readiness verification failed; aborting worker.")
-        sys.exit(1)
+    with standalone_logging():
+        if not asyncio.run(run_startup_checks()):
+            logger.error("Startup readiness verification failed; aborting worker.")
+            sys.exit(1)
 
     cli.run_app(server)

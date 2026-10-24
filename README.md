@@ -81,7 +81,7 @@ An automated inbound telephone voice agent for healthcare clinic reception opera
 
 ### 5. Telemetry & Non-Blocking Logging
 * **Langfuse v4:** Session traces are anchored to the LiveKit room name (`trace_id`). Tracks turn latencies, tool execution durations, token costs, and interruption counts.
-* **Decoupled Queue Logging (`logger.py`):** Logs use `QueueHandler` on the main loop and `QueueListener` on a dedicated worker thread to prevent thread contention or I/O stalls during WebRTC audio processing.
+* **Logging (`logger.py`):** Standard Python loggers that propagate to the handlers LiveKit installs. In each job process LiveKit queues records and ships them to the parent on a background thread, so logging never stalls audio. Every call's lines carry LiveKit's `room` (the trace ID), `job_id`, and `pid`, plus `room_sid` and `participant_id` from `bind_call_context`. Pre-worker code (startup checks, scripts) uses `standalone_logging()`.
 
 ---
 
@@ -108,7 +108,7 @@ voice_assistant/
 ├── session_state.py         # Typed per-call userdata (CallUserdata, BookingRecord, TransferRecord)
 ├── clinic_time.py           # Clinic timezone and natural-language date/slot parsing
 ├── config.py                # Pydantic-settings configuration loading (.env.dev / .env.prod)
-├── logger.py                # QueueHandler / QueueListener logging with per-call ContextVars
+├── logger.py                # Standard loggers with per-call fields; stdout handler for pre-worker scripts
 ├── startup.py               # Pre-flight health checks (LiveKit, Langfuse, Calendar, Telnyx)
 ├── telemetry.py             # Langfuse v4 trace setup and guardrail scores
 ├── requirements.txt         # Runtime dependencies with pinned version ranges

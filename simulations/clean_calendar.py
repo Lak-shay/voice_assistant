@@ -7,7 +7,7 @@ import sys
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from config import settings
-from logger import logger
+from logger import logger, standalone_logging
 from tools.calendar_service import CalendarService
 
 
@@ -36,4 +36,5 @@ def clean_test_reservations() -> None:
 
 
 if __name__ == "__main__":
-    clean_test_reservations()
+    with standalone_logging():
+        clean_test_reservations()

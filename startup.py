@@ -10,7 +10,7 @@ from livekit.api import LiveKitAPI
 from livekit.protocol.room import ListRoomsRequest
 
 from config import Settings, settings as default_settings
-from logger import startup_logger as logger
+from logger import standalone_logging, startup_logger as logger
 from tools.calendar_service import calendar_service
 
 
@@ -208,7 +208,8 @@ async def run_startup_checks(
 
 
 def main() -> None:
-    success = asyncio.run(run_startup_checks())
+    with standalone_logging():
+        success = asyncio.run(run_startup_checks())
     sys.exit(0 if success else 1)
 
 
