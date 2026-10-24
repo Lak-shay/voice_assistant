@@ -3,15 +3,19 @@ import base64
 from typing import Any
 
 from langfuse import Langfuse, propagate_attributes
+from livekit.agents.telemetry import set_tracer_provider
 from opentelemetry.exporter.otlp.proto.http.trace_exporter import OTLPSpanExporter
 from opentelemetry.sdk.resources import Resource
 from opentelemetry.sdk.trace import TracerProvider
 from opentelemetry.sdk.trace.export import BatchSpanProcessor
 
-from livekit.agents.telemetry import set_tracer_provider
-
 from config import settings
 from logger import logger
+
+
+def _langfuse_trace_id(trace_id: str) -> str:
+    """Deterministic Langfuse trace id for a call, so scores can attach to the root trace without a lookup."""
+    return Langfuse.create_trace_id(seed=trace_id)
 
 
 class TelemetryManager:
@@ -31,82 +35,72 @@ class TelemetryManager:
                 )
             except Exception as exc:
                 logger.warning("Failed to initialize Langfuse client: %s", exc)
-                self._client = None
         return self._client
+
+    def _get_trace_provider(self) -> TracerProvider:
+        if self._trace_provider is None:
+            auth = base64.b64encode(f"{settings.LANGFUSE_PUBLIC_KEY}:{settings.LANGFUSE_SECRET_KEY}".encode()).decode()
+            exporter = OTLPSpanExporter(
+                endpoint=f"{settings.LANGFUSE_BASE_URL.rstrip('/')}/api/public/otel/v1/traces",
+                headers={"Authorization": f"Basic {auth}", "x-langfuse-ingestion-version": "4"},
+            )
+            resource = Resource.create({
+                "deployment.environment": settings.APP_ENV,
+                "deployment.environment.name": settings.APP_ENV,
+                "langfuse.environment": settings.APP_ENV,
+                "service.name": "clinic-receptionist",
+            })
+            provider = TracerProvider(resource=resource)
+            provider.add_span_processor(BatchSpanProcessor(exporter))
+            self._trace_provider = provider
+        return self._trace_provider
 
     def create_session_trace(
         self,
-        room_name: str,
+        trace_id: str,
+        room_sid: str | None = None,
         participant_id: str | None = None,
-        session_id: str | None = None,
     ) -> Any | None:
+        """Open the root `inbound_call` observation for a call and route LiveKit's OTel spans to Langfuse."""
         client = self.get_client()
         if not client:
             return None
 
-        effective_session_id = session_id or room_name
-        trace_id_hex = Langfuse.create_trace_id(seed=effective_session_id)
-        metadata: dict[str, Any] = {
-            "room_name": room_name,
-            "clinic_name": settings.CLINIC_NAME,
-        }
-        if session_id and session_id != room_name:
-            metadata["room_sid"] = session_id
+        metadata: dict[str, Any] = {"room_name": trace_id, "clinic_name": settings.CLINIC_NAME}
+        if room_sid:
+            metadata["room_sid"] = room_sid
 
         try:
             with propagate_attributes(
                 trace_name="inbound_call",
-                session_id=effective_session_id,
+                session_id=trace_id,
                 user_id=participant_id or "caller",
                 environment=settings.APP_ENV,
                 metadata=metadata,
             ):
                 trace = client.start_observation(
                     name="inbound_call",
-                    trace_context={"trace_id": trace_id_hex},
+                    trace_context={"trace_id": _langfuse_trace_id(trace_id)},
                     metadata=metadata,
                 )
-            self._active_traces[room_name] = trace
-            if effective_session_id != room_name:
-                self._active_traces[effective_session_id] = trace
-
-            if settings.LANGFUSE_PUBLIC_KEY and settings.LANGFUSE_SECRET_KEY:
-                try:
-                    if self._trace_provider is None:
-                        auth = base64.b64encode(f"{settings.LANGFUSE_PUBLIC_KEY}:{settings.LANGFUSE_SECRET_KEY}".encode()).decode()
-                        base_url = settings.LANGFUSE_BASE_URL.rstrip("/")
-                        endpoint = f"{base_url}/api/public/otel/v1/traces"
-                        headers = {
-                            "Authorization": f"Basic {auth}",
-                            "x-langfuse-ingestion-version": "4",
-                        }
-
-                        resource = Resource.create({
-                            "deployment.environment": settings.APP_ENV,
-                            "deployment.environment.name": settings.APP_ENV,
-                            "langfuse.environment": settings.APP_ENV,
-                            "service.name": "clinic-receptionist",
-                        })
-                        provider = TracerProvider(resource=resource)
-                        exporter = OTLPSpanExporter(endpoint=endpoint, headers=headers)
-                        provider.add_span_processor(BatchSpanProcessor(exporter))
-                        self._trace_provider = provider
-
-                    set_tracer_provider(
-                        self._trace_provider,
-                        metadata={
-                            "langfuse.session.id": room_name,
-                            "langfuse.environment": settings.APP_ENV,
-                            "deployment.environment": settings.APP_ENV,
-                        },
-                    )
-                except Exception as otel_exc:
-                    logger.warning("[%s] Failed to attach OpenTelemetry tracer provider: %s", room_name, otel_exc)
-
-            return trace
         except Exception as exc:
-            logger.warning("[%s] Failed to create Langfuse trace: %s", room_name, exc)
+            logger.warning("Failed to create Langfuse trace: %s", exc)
             return None
+        self._active_traces[trace_id] = trace
+
+        try:
+            set_tracer_provider(
+                self._get_trace_provider(),
+                metadata={
+                    "langfuse.session.id": trace_id,
+                    "langfuse.environment": settings.APP_ENV,
+                    "deployment.environment": settings.APP_ENV,
+                },
+            )
+        except Exception as exc:
+            logger.warning("Failed to attach OpenTelemetry tracer provider: %s", exc)
+
+        return trace
 
     async def flush(self, trace_id: str | None = None) -> None:
         if trace_id:
@@ -115,7 +109,7 @@ class TelemetryManager:
                 try:
                     trace.end()
                 except Exception as exc:
-                    logger.warning("[%s] Error ending root trace observation: %s", trace_id, exc)
+                    logger.warning("Error ending root trace observation: %s", exc)
 
         if self._trace_provider:
             try:
@@ -124,27 +118,25 @@ class TelemetryManager:
                 logger.warning("Error flushing tracer provider: %s", exc)
 
         client = self.get_client()
-        if not client:
-            return
-
-        # Flush background worker buffer in separate thread to prevent event loop stalls
-        try:
-            await asyncio.to_thread(client.flush)
-        except Exception as exc:
-            logger.warning("Langfuse telemetry flush error: %s", exc)
+        if client:
+            try:
+                await asyncio.to_thread(client.flush)
+            except Exception as exc:
+                logger.warning("Langfuse telemetry flush error: %s", exc)
 
     def record_guardrail_event(self, trace_id: str, event_type: str, details: dict[str, Any] | None = None) -> None:
         client = self.get_client()
         if not client:
             return
         try:
-            client.score(
+            client.create_score(
                 name="guardrail_intervention",
                 value=1.0,
+                trace_id=_langfuse_trace_id(trace_id),
                 comment=f"{event_type}: {details or {}}",
             )
         except Exception as exc:
-            logger.debug("[%s] Telemetry guardrail score notice: %s", trace_id, exc)
+            logger.warning("Failed to record guardrail score: %s", exc)
 
 
 telemetry = TelemetryManager()

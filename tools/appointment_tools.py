@@ -1,32 +1,28 @@
 from __future__ import annotations
 
-import re
 from typing import Annotated
 
 from dateutil import parser
-
 from livekit import rtc
-from livekit.agents import RunContext, function_tool, get_job_context
+from livekit.agents import JobContext, RunContext, SimulationContext, function_tool
 from pydantic import Field
 
+from clinic_time import parse_flexible_date
 from config import settings
-from logger import logger
-from tools.calendar_service import (
-    calendar_service,
-    parse_flexible_date,
-)
-from tools.sms_service import sanitize_e164, sms_service
 from guardrails.tool_guardrails import (
     validate_booking_date_range,
     validate_patient_name,
     validate_patient_phone,
 )
+from logger import logger
+from session_state import BookingRecord, CallUserdata, TransferRecord
+from tools.calendar_service import PERIODS, calendar_service, classify_period
+from tools.phone import sanitize_e164
+from tools.sms_service import sms_service
+from tools.speech_format import format_date_phonetically, format_slot_phonetically, format_weekday_date
 
-
-def _ordinal_suffix(day: int) -> str:
-    if 11 <= (day % 100) <= 13:
-        return "th"
-    return {1: "st", 2: "nd", 3: "rd"}.get(day % 10, "th")
+TRANSFERRING_REPLY = "I am transferring you to our front desk now. Please hold while I connect your call."
+TRANSFER_FAILED_REPLY = "I was unable to transfer your call right now. Please call our clinic directly."
 
 
 def _format_spoken_slot_choices(spoken: list[str], prefix: str = "We have ") -> str:
@@ -37,118 +33,50 @@ def _format_spoken_slot_choices(spoken: list[str], prefix: str = "We have ") -> 
     return f"{prefix}openings on {spoken[0]}, {spoken[1]}, or {spoken[2]}. Which time suits you best?"
 
 
-def _get_active_periods(slots: list[str]) -> list[str]:
-    return [p for p in ("morning", "afternoon", "evening") if any(calendar_service.classify_period(s) == p for s in slots)]
+def _describe_periods(periods: list[str]) -> str:
+    if len(periods) == 1:
+        return f"in the {periods[0]}. Would you like {periods[0]}?"
+    if len(periods) == 2:
+        return f"in the {periods[0]} and {periods[1]}. Would you prefer {periods[0]} or {periods[1]}?"
+    return f"in the {', '.join(periods[:-1])}, and {periods[-1]}. Which period works best for you?"
 
 
-def format_date_phonetically(date_str: str) -> str:
-    try:
-        dt = parser.parse(date_str.strip()).date()
-        return f"{dt.strftime('%B')} {dt.day}{_ordinal_suffix(dt.day)}"
-    except Exception:
-        return date_str
-
-
-def format_slot_phonetically(slot_iso: str) -> str:
-    try:
-        dt = parser.parse(slot_iso.strip())
-        month_name = dt.strftime("%B")
-        hour = dt.strftime("%I").lstrip("0")
-        minute = dt.strftime("%M")
-        am_pm = dt.strftime("%p")
-        time_str = f"{hour} {minute} {am_pm}" if minute != "00" else f"{hour} {am_pm}"
-        return f"{month_name} {dt.day}{_ordinal_suffix(dt.day)} at {time_str}"
-    except Exception:
-        return slot_iso
+def _active_periods(slots: list[str]) -> list[str]:
+    present = {classify_period(s) for s in slots}
+    return [p for p in PERIODS if p in present]
 
 
 def normalize_time_str(time_str: str) -> str | None:
+    """'2 PM' / '14:00' / '10' -> 'HH:MM:00'. A bare hour of 9-11 is read as AM, anything else as PM."""
     if not time_str:
         return None
     cleaned = time_str.strip().upper()
     if cleaned.isdigit():
         h = int(cleaned)
         if 1 <= h <= 12:
-            period = "AM" if 9 <= h <= 11 else "PM"
-            cleaned = f"{h} {period}"
+            cleaned = f"{h} {'AM' if 9 <= h <= 11 else 'PM'}"
     try:
         t = parser.parse(cleaned).time()
-        return f"{t.hour:02d}:{t.minute:02d}:00"
     except (ValueError, OverflowError, parser.ParserError):
         return None
+    return f"{t.hour:02d}:{t.minute:02d}:00"
 
 
-async def _respond_to_time_request(
-    preferred_time: str,
-    date_str: str,
-    all_day_slots: list[str],
-    available_periods: list[str],
-    phonetic_date: str,
-) -> str:
-    norm_time = normalize_time_str(preferred_time)
-    if norm_time:
-        target_slot = f"{date_str}T{norm_time}"
-        if target_slot in all_day_slots:
-            return f"{format_slot_phonetically(target_slot)} is open. Would you like me to book that for you?"
-
-    if not available_periods:
-        nearby = await calendar_service.find_nearby_available_slots(date_str)
-        if nearby:
-            next_date, next_slots = nearby[0]
-            next_date_phonetic = format_date_phonetically(next_date)
-            next_periods = _get_active_periods(next_slots)
-            return (
-                f"We are fully booked on {phonetic_date}. The closest openings around that time are on "
-                f"{next_date_phonetic} in the {' and '.join(next_periods)}. Would you like to check that day?"
-            )
-        return f"I could not find any open slots around {phonetic_date} for {settings.CLINIC_NAME}. Would you like to check another week?"
-
-    if len(available_periods) == 1:
-        period_name = available_periods[0]
-        return f"That exact time is unavailable on {phonetic_date}, but we have openings in the {period_name}. Would you like {period_name}?"
-    if len(available_periods) == 2:
-        return (
-            f"That exact time is unavailable on {phonetic_date}, but we have openings in the "
-            f"{available_periods[0]} and {available_periods[1]}. Would you prefer {available_periods[0]} or {available_periods[1]}?"
-        )
-    return f"That exact time is unavailable on {phonetic_date}, but we have openings in the morning, afternoon, and evening. Which period works best for you?"
-
-
-async def _respond_no_preference(
-    date_str: str,
-    slots_by_period: dict[str, list[str]],
-    available_periods: list[str],
-    phonetic_date: str,
-) -> str:
-    if not available_periods:
-        nearby = await calendar_service.find_nearby_available_slots(date_str)
-        if nearby:
-            next_date, next_slots = nearby[0]
-            next_date_phonetic = format_date_phonetically(next_date)
-            next_periods = _get_active_periods(next_slots)
-            return (
-                f"I could not find any open slots on that date for {settings.CLINIC_NAME}. The closest openings are on "
-                f"{next_date_phonetic} in the {' and '.join(next_periods)}. Would you like to check that day?"
-            )
-        return f"I could not find any open slots on that date for {settings.CLINIC_NAME}. Would you like to check another day?"
-
-    if len(available_periods) == 1:
-        period_name = available_periods[0]
-        spoken = [format_slot_phonetically(s) for s in slots_by_period[period_name][:3]]
-        return _format_spoken_slot_choices(spoken)
-
-    if len(available_periods) == 2:
-        return (
-            f"On {phonetic_date}, we have openings in the {available_periods[0]} and {available_periods[1]}. "
-            f"Would you prefer {available_periods[0]} or {available_periods[1]}?"
-        )
-
-    return f"On {phonetic_date}, we have openings in the morning, afternoon, and evening. Which period do you prefer?"
+async def _fully_booked_reply(date_str: str, spoken_date: str) -> str:
+    nearby = await calendar_service.find_next_available_day(date_str)
+    if not nearby:
+        return f"We are fully booked on {spoken_date}. Would you like to check another week?"
+    next_date, next_slots = nearby
+    return (
+        f"We are fully booked on {spoken_date}. The closest openings are on "
+        f"{format_date_phonetically(next_date)} in the {' and '.join(_active_periods(next_slots))}. "
+        "Would you like to check that day?"
+    )
 
 
 @function_tool()
 async def check_availability(
-    context: RunContext,
+    context: RunContext[CallUserdata],
     preferred_date: Annotated[
         str,
         Field(description="Date or relative phrase for the appointment (e.g. 'next Thursday', 'tomorrow', 'this Friday', 'next Monday', or YYYY-MM-DD). Pass relative phrases directly."),
@@ -159,91 +87,64 @@ async def check_availability(
     ] = None,
     preferred_period: Annotated[
         str | None,
-        Field(default=None, description="Optional period of the day: 'morning' (before 12 PM), 'afternoon' (12 PM to 4 PM), or 'evening' (4 PM and later, including late afternoon)"),
+        Field(
+            default=None,
+            description=(
+                f"Optional period of the day: 'morning' (before {settings.AFTERNOON_START_HOUR}:00), "
+                f"'afternoon' ({settings.AFTERNOON_START_HOUR}:00 to {settings.EVENING_START_HOUR}:00), or "
+                f"'evening' ({settings.EVENING_START_HOUR}:00 and later, including late afternoon)"
+            ),
+        ),
     ] = None,
 ) -> str:
     """Check open appointment slots for a given date, specific time, or time of day."""
     try:
-        tz = calendar_service._get_timezone()
-        parsed_date = parse_flexible_date(preferred_date, tz)
-        date_str = parsed_date.isoformat() if parsed_date else preferred_date.strip()
+        target_date = parse_flexible_date(preferred_date)
+        if not target_date:
+            return "I did not catch that date. Which day would you like to come in?"
 
-        is_valid_date, date_err = validate_booking_date_range(parsed_date or date_str)
+        is_valid_date, date_err = validate_booking_date_range(target_date)
         if not is_valid_date:
             return date_err or "Please provide a valid date."
 
+        date_str = target_date.isoformat()
+        spoken_date = format_weekday_date(target_date)
         slots_by_period = await calendar_service.get_slots_by_period(date_str)
-        all_day_slots = [s for sublist in slots_by_period.values() for s in sublist]
-        available_periods = [p for p in ("morning", "afternoon", "evening") if slots_by_period.get(p)]
-        dt_val = parsed_date or parser.parse(date_str).date()
-        phonetic_date = f"{dt_val.strftime('%A')}, {format_date_phonetically(date_str)}"
+        available_periods = [p for p in PERIODS if slots_by_period[p]]
+
+        if not available_periods:
+            return await _fully_booked_reply(date_str, spoken_date)
 
         if preferred_time:
-            return await _respond_to_time_request(
-                preferred_time, date_str, all_day_slots, available_periods, phonetic_date,
-            )
+            norm_time = normalize_time_str(preferred_time)
+            target_slot = f"{date_str}T{norm_time}" if norm_time else None
+            if target_slot and any(target_slot in slots for slots in slots_by_period.values()):
+                return f"{format_slot_phonetically(target_slot)} is open. Would you like me to book that for you?"
+            return f"That exact time is unavailable on {spoken_date}, but we have openings {_describe_periods(available_periods)}"
 
         if preferred_period:
             period_key = preferred_period.lower().strip()
             period_slots = slots_by_period.get(period_key, [])
             if period_slots:
                 spoken = [format_slot_phonetically(s) for s in period_slots[:3]]
-                return _format_spoken_slot_choices(spoken, prefix=f"In the {period_key} on {phonetic_date}, we have ")
-            if available_periods:
-                return f"We have no {period_key} openings on {phonetic_date}, but we have slots in the {' and '.join(available_periods)}. Would either of those work for you?"
+                return _format_spoken_slot_choices(spoken, prefix=f"In the {period_key} on {spoken_date}, we have ")
+            return (
+                f"We have no {period_key} openings on {spoken_date}, but we have slots in the "
+                f"{' and '.join(available_periods)}. Would either of those work for you?"
+            )
 
-        return await _respond_no_preference(date_str, slots_by_period, available_periods, phonetic_date)
+        if len(available_periods) == 1:
+            spoken = [format_slot_phonetically(s) for s in slots_by_period[available_periods[0]][:3]]
+            return _format_spoken_slot_choices(spoken)
+        return f"On {spoken_date}, we have openings {_describe_periods(available_periods)}"
     except Exception as exc:
         logger.warning("Error checking availability: %s", exc)
         return "I had trouble checking the schedule just now. Could you please repeat your preferred date?"
 
 
-def get_sip_caller_phone(room: rtc.Room | None = None, participant: rtc.Participant | None = None) -> str | None:
-    """Extract E.164 phone number from SIP participant attributes, identity, or room name."""
-    candidates: list[str] = []
-    seen_ids: set[int] = set()
-
-    def _extract_from_participant(p: rtc.Participant) -> None:
-        obj_id = id(p)
-        if obj_id in seen_ids:
-            return
-        seen_ids.add(obj_id)
-        attrs = getattr(p, "attributes", {}) or {}
-        if isinstance(attrs, dict) and attrs.get("sip.phoneNumber"):
-            candidates.append(attrs["sip.phoneNumber"])
-        identity = getattr(p, "identity", None)
-        if isinstance(identity, str):
-            if identity.startswith("sip_"):
-                candidates.append(identity.removeprefix("sip_"))
-            elif not identity.startswith("playground_") and not identity.startswith("agent_"):
-                candidates.append(identity)
-
-    if participant is not None:
-        _extract_from_participant(participant)
-
-    if room and hasattr(room, "remote_participants") and isinstance(room.remote_participants, dict):
-        for p in room.remote_participants.values():
-            _extract_from_participant(p)
-
-    if room and hasattr(room, "name"):
-        raw_name = getattr(room, "name", None)
-        if isinstance(raw_name, str):
-            match = re.search(r"(\+?\d{10,15})", raw_name)
-            if match:
-                candidates.append(match.group(1))
-
-    for cand in candidates:
-        sanitized = sanitize_e164(cand)
-        if sanitized:
-            logger.info("Resolved caller phone number: raw=%s, sanitized=%s", cand, sanitized)
-            return sanitized
-
-    return None
-
-
 @function_tool()
 async def book_appointment(
-    context: RunContext,
+    context: RunContext[CallUserdata],
     patient_name: Annotated[
         str,
         Field(description="Full name of the patient"),
@@ -279,15 +180,13 @@ async def book_appointment(
             return str(res.get("error", "That slot is unavailable. Please choose another time."))
 
         booked_slot = res.get("slot_time", slot_time)
-        if hasattr(context, "userdata") and isinstance(context.userdata, dict):
-            context.userdata["last_booking"] = {
-                "patient_name": patient_name.strip(),
-                "patient_phone": clean_phone,
-                "slot_time": booked_slot,
-                "success": bool(res.get("success")),
-            }
-        phonetic_time = format_slot_phonetically(booked_slot)
-        return f"You are all set, {patient_name.strip()}. Your appointment is confirmed for {phonetic_time}."
+        context.userdata.last_booking = BookingRecord(
+            patient_name=clean_name,
+            patient_phone=clean_phone,
+            slot_time=booked_slot,
+        )
+        logger.info("Booked appointment slot %s", booked_slot)
+        return f"You are all set, {clean_name}. Your appointment is confirmed for {format_slot_phonetically(booked_slot)}."
     except Exception as exc:
         logger.warning("Error booking appointment: %s", exc)
         return "I was unable to finalize the booking due to a temporary glitch. Let us try once more."
@@ -295,7 +194,7 @@ async def book_appointment(
 
 @function_tool()
 async def send_confirmation_sms(
-    context: RunContext,
+    context: RunContext[CallUserdata],
     patient_phone: Annotated[
         str,
         Field(description="Phone number to receive the confirmation text (e.g. +1XXXXXXXXXX)"),
@@ -321,9 +220,19 @@ async def send_confirmation_sms(
         return "Your appointment is confirmed, though I could not send the text message at this moment."
 
 
+def _find_caller(room: rtc.Room) -> rtc.RemoteParticipant | None:
+    participants = list(room.remote_participants.values())
+    sip = next((p for p in participants if p.kind == rtc.ParticipantKind.PARTICIPANT_KIND_SIP), None)
+    return sip or (participants[0] if participants else None)
+
+
+def _is_simulation(job_ctx: JobContext) -> bool:
+    return isinstance(job_ctx.simulation_context(), SimulationContext)
+
+
 @function_tool()
 async def transfer_to_human(
-    context: RunContext,
+    context: RunContext[CallUserdata],
     reason: Annotated[
         str | None,
         Field(default=None, description="Optional brief reason for transferring the call to front desk staff"),
@@ -336,61 +245,29 @@ async def transfer_to_human(
         logger.warning("CLINIC_FAILOVER_PHONE is not configured or invalid: %s", settings.CLINIC_FAILOVER_PHONE)
         return "I am unable to transfer your call because the front desk phone number is not configured."
 
-    job_ctx = None
-    if hasattr(context, "userdata") and isinstance(context.userdata, dict):
-        job_ctx = context.userdata.get("job_ctx")
-        context.userdata["last_transfer"] = {
-            "transferred": True,
-            "failover_phone": failover_phone,
-            "reason": reason,
-        }
-    if job_ctx is None:
-        try:
-            job_ctx = get_job_context()
-        except Exception:
-            job_ctx = None
+    def record(transferred: bool) -> None:
+        context.userdata.last_transfer = TransferRecord(failover_phone=failover_phone, reason=reason, transferred=transferred)
 
-    if job_ctx is None:
-        logger.info("Transfer to human initiated in mock/standalone mode: failover=%s, reason=%s", failover_phone, reason)
-        return "I am transferring you to the front desk now. Please hold while I connect your call."
+    job_ctx = context.userdata.job_ctx
+    # Simulated calls have no SIP leg to transfer, so the intent is recorded for the simulation assertions.
+    if job_ctx is None or _is_simulation(job_ctx):
+        logger.info("Simulated transfer to front desk %s (reason: %s)", failover_phone, reason)
+        record(True)
+        return TRANSFERRING_REPLY
 
-    room = getattr(job_ctx, "room", None)
-    remote_participants = getattr(room, "remote_participants", {}) if room else {}
-
-    target_participant = next(
-        (
-            p for p in remote_participants.values()
-            if getattr(p, "kind", None) == rtc.ParticipantKind.PARTICIPANT_KIND_SIP
-        ),
-        None,
-    )
-    if target_participant is None and remote_participants:
-        target_participant = next(iter(remote_participants.values()))
-
-    if not target_participant:
+    caller = _find_caller(job_ctx.room)
+    if caller is None:
         logger.warning("No remote caller participant found to transfer.")
-        return "I am transferring you to the front desk now. Please hold while I connect your call."
+        record(False)
+        return TRANSFER_FAILED_REPLY
 
+    logger.info("Transferring participant %s to %s (reason: %s)", caller.identity, failover_phone, reason)
     try:
-        logger.info(
-            "Transferring participant %s to failover number %s (reason: %s)",
-            target_participant.identity,
-            failover_phone,
-            reason,
-        )
-        transfer_res = job_ctx.transfer_sip_participant(
-            target_participant.identity,
-            f"tel:{failover_phone}",
-            play_dialtone=False,
-        )
-        if hasattr(transfer_res, "__await__"):
-            await transfer_res
-        return "I am transferring you to our front desk now. Please hold while I connect your call."
+        await job_ctx.transfer_sip_participant(caller.identity, f"tel:{failover_phone}", play_dialtone=False)
     except Exception as exc:
-        sim_ctx = job_ctx.simulation_context() if hasattr(job_ctx, "simulation_context") and callable(job_ctx.simulation_context) else None
-        is_real_sim = sim_ctx is not None and sim_ctx.__class__.__name__ == "SimulationContext"
-        if is_real_sim:
-            logger.info("SIP transfer exception in simulation environment handled gracefully: %s", exc)
-            return "I am transferring you to our front desk now. Please hold while I connect your call."
-        logger.warning("Error transferring SIP call to %s: %s", failover_phone, exc)
-        return "I was unable to transfer your call right now. Please call our clinic directly."
+        logger.error("SIP transfer to %s failed: %s", failover_phone, exc)
+        record(False)
+        return TRANSFER_FAILED_REPLY
+
+    record(True)
+    return TRANSFERRING_REPLY

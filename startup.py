@@ -120,7 +120,7 @@ async def check_telnyx_connection(
     if not settings.TELNYX_API_KEY:
         return False, "Missing TELNYX_API_KEY while SMS_BACKEND is 'telnyx'"
 
-    url = "https://api.telnyx.com/v2/balance"
+    url = f"{settings.TELNYX_API_BASE_URL.rstrip('/')}/balance"
     headers = {
         "Authorization": f"Bearer {settings.TELNYX_API_KEY}",
         "Content-Type": "application/json",
@@ -149,23 +149,29 @@ async def check_calendar_connection(
     if not settings.CALENDAR_API_KEY:
         return False, "Missing CALENDAR_API_KEY while CALENDAR_BACKEND is 'google'"
 
-    try:
-        service = calendar_service._get_google_service()
+    cal_id = settings.CALENDAR_ID or "primary"
+
+    def _query_freebusy() -> dict | None:
+        service = calendar_service.get_google_service()
         if not service:
-            return False, "Failed to initialize Google Calendar client from configured credentials"
-        cal_id = settings.CALENDAR_ID or "primary"
+            return None
         now = datetime.datetime.now(datetime.timezone.utc)
         body = {
             "timeMin": now.isoformat(),
             "timeMax": (now + datetime.timedelta(hours=1)).isoformat(),
             "items": [{"id": cal_id}],
         }
-        res = await asyncio.to_thread(service.freebusy().query(body=body).execute)
-        if "calendars" in res:
-            return True, f"Connected to Google Calendar API (Calendar ID: {cal_id})"
-        return False, "Google Calendar freebusy query did not return expected calendar data"
+        return service.freebusy().query(body=body).execute()
+
+    try:
+        res = await asyncio.wait_for(asyncio.to_thread(_query_freebusy), timeout=settings.STARTUP_CHECK_TIMEOUT)
     except Exception as exc:
         return False, f"Google Calendar connection failed: {exc}"
+    if res is None:
+        return False, "Failed to initialize Google Calendar client from configured credentials"
+    if "calendars" in res:
+        return True, f"Connected to Google Calendar API (Calendar ID: {cal_id})"
+    return False, "Google Calendar freebusy query did not return expected calendar data"
 
 
 async def run_startup_checks(
@@ -185,9 +191,9 @@ async def run_startup_checks(
         ("Google Calendar", check_calendar_connection),
     ]
 
+    results = await asyncio.gather(*(check_fn(app_settings) for _, check_fn in checks))
     all_ok = True
-    for label, check_fn in checks:
-        ok, msg = await check_fn(app_settings)
+    for (label, _), (ok, msg) in zip(checks, results):
         if ok:
             logger.info("[PASS] [%s]: %s", label, msg)
         else:
@@ -195,14 +201,10 @@ async def run_startup_checks(
             all_ok = False
 
     if all_ok:
-        logger.info(
-            "!!!!!!!!!!! Application startup readiness check passed (environment: %s) !!!!!!!!!!!!!!",
-            app_settings.APP_ENV,
-        )
-        return True
+        logger.info("Startup readiness check passed (environment: %s)", app_settings.APP_ENV)
     else:
-        logger.error("Application startup readiness check failed.")
-        return False
+        logger.error("Startup readiness check failed.")
+    return all_ok
 
 
 def main() -> None:

@@ -15,7 +15,7 @@ def clean_test_reservations() -> None:
     cs = CalendarService()
     cs.clear_reservations()
 
-    service = cs._get_google_service()
+    service = cs.get_google_service()
     if service and settings.CALENDAR_BACKEND == "google":
         cal_id = settings.CALENDAR_ID or "primary"
         try:
