@@ -1,23 +1,16 @@
 from __future__ import annotations
 
-import os
-import sys
-
-# Ensure repository root is on sys.path
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-
 from config import settings
 from logger import logger, standalone_logging
-from tools.calendar_service import CalendarService
+from tools.calendar_service import calendar_service
 
 
 def clean_test_reservations() -> None:
-    cs = CalendarService()
-    cs.clear_reservations()
+    calendar_service.clear_reservations()
 
-    service = cs.get_google_service()
+    service = calendar_service.get_google_service()
     if service and settings.CALENDAR_BACKEND == "google":
-        cal_id = settings.CALENDAR_ID or "primary"
+        cal_id = calendar_service.calendar_id
         try:
             events_res = service.events().list(calendarId=cal_id, singleEvents=True).execute()
             items = events_res.get("items", [])

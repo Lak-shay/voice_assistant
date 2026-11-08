@@ -625,6 +625,7 @@ async def test_tool_book_appointment_rejects_invalid_phone():
 async def test_tool_transfer_to_human_success():
     mock_run_ctx = MagicMock()
     mock_job_ctx = MagicMock()
+    mock_job_ctx.simulation_context.return_value = None
     mock_job_ctx.transfer_sip_participant = AsyncMock(return_value=None)
 
     mock_participant = MagicMock()
@@ -656,6 +657,7 @@ async def test_tool_transfer_to_human_missing_config(monkeypatch):
 async def test_tool_transfer_to_human_handles_sip_error():
     mock_run_ctx = MagicMock()
     mock_job_ctx = MagicMock()
+    mock_job_ctx.simulation_context.return_value = None
     mock_job_ctx.transfer_sip_participant = AsyncMock(side_effect=RuntimeError("SIP 486 Busy Here"))
 
     mock_participant = MagicMock()
@@ -708,6 +710,7 @@ async def test_tool_check_availability_rejects_past_date():
 @pytest.mark.asyncio
 async def test_tool_transfer_records_outcome():
     job_ctx = MagicMock()
+    job_ctx.simulation_context.return_value = None
     caller = MagicMock(identity="sip_caller", kind=rtc.ParticipantKind.PARTICIPANT_KIND_SIP)
     job_ctx.room.remote_participants = {"p1": caller}
 

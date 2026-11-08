@@ -156,7 +156,11 @@ def _build_session(ctx: JobContext, trace_id: str, caller_phone: str | None) -> 
 
     return AgentSession(
         vad=ctx.proc.userdata["vad"],
-        stt=inference.STT(f"{settings.STT_PROVIDER}/{settings.STT_MODEL}", **credentials),
+        stt=inference.STT(
+            f"{settings.STT_PROVIDER}/{settings.STT_MODEL}",
+            language=settings.STT_LANGUAGE,
+            **credentials,
+        ),
         llm=inference.LLM(
             f"{settings.LLM_PROVIDER}/{settings.LLM_MODEL}",
             inference_class=settings.LLM_INFERENCE_CLASS,
@@ -212,8 +216,7 @@ async def entrypoint(ctx: JobContext) -> None:
 
     session = _build_session(ctx, trace_id, caller_phone)
     root_span = telemetry.otel_parent_span(trace_id)
-    # Session tasks copy the current OTel context when they are created, so starting the session
-    # while the root is current makes every turn, LLM, TTS and tool span a child of inbound_call.
+
     # LiveKit reports end_call as "user_initiated" (any session.shutdown()), so track the cause here.
     @session.on("function_tools_executed")
     def on_tools_executed(ev: FunctionToolsExecutedEvent) -> None:
@@ -226,12 +229,13 @@ async def entrypoint(ctx: JobContext) -> None:
         logger.info("Call ended: end_reason=%s livekit_reason=%s", end_reason, ev.reason.value)
         telemetry.record_call_end(trace_id, end_reason, ev.reason.value)
 
+    # Session tasks copy the current OTel context when they are created, so starting the session
+    # while the root is current makes every turn, LLM, TTS and tool span a child of inbound_call.
     with trace_api.use_span(root_span, end_on_exit=False) if root_span else contextlib.nullcontext():
         await session.start(
             agent=ClinicReceptionistAgent(caller_phone=caller_phone),
             room=ctx.room,
             room_options=room_io.RoomOptions(
-                audio_input=room_io.AudioInputOptions(),
                 text_input=room_io.TextInputOptions(text_input_cb=_guarded_text_input_cb),
             ),
         )

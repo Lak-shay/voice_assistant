@@ -52,7 +52,12 @@ $pythonPath = if (Test-Path "$rootDir\.venv\Scripts\python.exe") {
 $cleanScript = Join-Path $rootDir "simulations\clean_calendar.py"
 if (Test-Path $cleanScript) {
     Write-Host "Resetting test reservations..." -ForegroundColor DarkYellow
-    & $pythonPath $cleanScript
+    Push-Location $rootDir
+    try {
+        & $pythonPath -m simulations.clean_calendar
+    } finally {
+        Pop-Location
+    }
 }
 
 $agentPath = if (Test-Path "agent.py") { "agent.py" } else { Join-Path $rootDir "agent.py" }

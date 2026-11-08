@@ -50,6 +50,7 @@ class Settings(BaseSettings):
     # LiveKit Inference Model Selection
     STT_PROVIDER: str
     STT_MODEL: str
+    STT_LANGUAGE: str = "en"
     LLM_PROVIDER: str
     LLM_MODEL: str
     LLM_INFERENCE_CLASS: Literal["priority", "standard", "low"] | None = None
