@@ -42,12 +42,15 @@ class Settings(BaseSettings):
     CLINIC_FAILOVER_PHONE: str
     SIP_TRUNK_ID: str = ""
     DEFAULT_COUNTRY_CODE: str = "+1"
+    MOCK_CALLER_PHONE_ENABLED: bool = False
+    MOCK_CALLER_PHONE: str = "+15555550100"
 
     # LiveKit Inference Model Selection
     STT_PROVIDER: str
     STT_MODEL: str
     LLM_PROVIDER: str
     LLM_MODEL: str
+    LLM_INFERENCE_CLASS: str = ""
     TTS_PROVIDER: str
     TTS_MODEL: str
     TTS_VOICE_ID: str

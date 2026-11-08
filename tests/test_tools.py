@@ -15,9 +15,14 @@ from tools.appointment_tools import (
     transfer_to_human,
 )
 from tools.calendar_service import NOT_A_SLOT_ERROR, CalendarService, CalendarUnavailableError, calendar_service
-from tools.phone import get_sip_caller_phone
+from tools.phone import get_mock_caller_phone, get_sip_caller_phone
 from tools.sms_service import SMSService
-from tools.speech_format import format_date_phonetically, format_slot_phonetically
+from tools.speech_format import (
+    format_date_phonetically,
+    format_slot_phonetically,
+    speak_clock_times,
+    spoken_times_transform,
+)
 
 FUTURE_ISO = (datetime.date.today() + datetime.timedelta(days=14)).isoformat()
 
@@ -29,13 +34,41 @@ def isolate_test_environment(monkeypatch):
 
 
 def test_format_slot_phonetically():
-    assert "September 10th at 2 30 PM" == format_slot_phonetically("2026-09-10T14:30:00")
-    assert "January 1st at 9 AM" == format_slot_phonetically("2026-01-01T09:00:00")
-    assert "March 2nd at 11 15 AM" == format_slot_phonetically("2026-03-02T11:15:00")
-    assert "October 15th at 10 AM" == format_slot_phonetically("2026-10-15 10:00 AM")
+    assert "September 10th at two thirty PM" == format_slot_phonetically("2026-09-10T14:30:00")
+    assert "January 1st at nine AM" == format_slot_phonetically("2026-01-01T09:00:00")
+    assert "March 2nd at eleven fifteen AM" == format_slot_phonetically("2026-03-02T11:15:00")
+    assert "October 15th at ten AM" == format_slot_phonetically("2026-10-15 10:00 AM")
+    assert "May 4th at nine oh five AM" == format_slot_phonetically("2026-05-04T09:05:00")
+    assert "May 4th at twelve PM" == format_slot_phonetically("2026-05-04T12:00:00")
+    assert "May 4th at four forty five PM" == format_slot_phonetically("2026-05-04T16:45:00")
     assert "invalid-date" == format_slot_phonetically("invalid-date")
     assert "September 10th" == format_date_phonetically("2026-09-10")
     assert "October 5th" == format_date_phonetically("October 5th, 2026")
+
+
+@pytest.mark.parametrize(
+    "text, expected",
+    [
+        ("Your slot is 11:00 AM.", "Your slot is eleven AM."),
+        ("How about 2:30pm?", "How about two thirty PM?"),
+        ("At 9:05 a.m. then", "At nine oh five AM. then"),
+        ("14:30 works", "two thirty PM works"),
+        ("Is 10:30 okay?", "Is ten thirty okay?"),
+        ("Room 3:1 ratio and 5 5 5", "Room 3:1 ratio and 5 5 5"),
+    ],
+)
+def test_speak_clock_times(text, expected):
+    assert speak_clock_times(text) == expected
+
+
+@pytest.mark.asyncio
+async def test_spoken_times_transform_handles_times_split_across_chunks():
+    async def chunks():
+        for part in ["We have ", "11", ":0", "0 A", "M or 2:3", "0 PM", ". Which", " works?"]:
+            yield part
+
+    spoken = "".join([c async for c in spoken_times_transform(chunks())])
+    assert spoken == "We have eleven AM or two thirty PM. Which works?"
 
 
 @pytest.mark.asyncio
@@ -544,6 +577,23 @@ def test_get_sip_caller_phone_ignores_digit_runs_outside_sip():
     sip_room = MagicMock(remote_participants={"p": sip_caller})
     sip_room.name = "regular_room"
     assert get_sip_caller_phone(sip_room) == "+18455550199"
+
+
+def test_get_mock_caller_phone_follows_flag(monkeypatch):
+    monkeypatch.setattr("tools.phone.settings.MOCK_CALLER_PHONE", "(555) 555-0100")
+    monkeypatch.setattr("tools.phone.settings.APP_ENV", "dev")
+    monkeypatch.setattr("tools.phone.settings.MOCK_CALLER_PHONE_ENABLED", False)
+    assert get_mock_caller_phone() is None
+
+    monkeypatch.setattr("tools.phone.settings.MOCK_CALLER_PHONE_ENABLED", True)
+    assert get_mock_caller_phone() == "+15555550100"
+
+    monkeypatch.setattr("tools.phone.settings.APP_ENV", "prod")
+    assert get_mock_caller_phone() is None
+    monkeypatch.setattr("tools.phone.settings.APP_ENV", "dev")
+
+    monkeypatch.setattr("tools.phone.settings.MOCK_CALLER_PHONE", "not-a-number")
+    assert get_mock_caller_phone() is None
 
 
 @pytest.mark.asyncio

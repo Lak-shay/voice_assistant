@@ -16,6 +16,7 @@ from livekit.agents import (
     llm,
     room_io,
 )
+from livekit.agents.beta.tools import EndCallTool
 from livekit.agents.llm import StopResponse
 from livekit.agents.worker import JobExecutorType
 from livekit.plugins import silero
@@ -26,7 +27,7 @@ from config import settings
 from guardrails.input_guardrails import check_input_guardrails
 from guardrails.output_guardrails import mask_secrets_transform
 from logger import bind_call_context, logger, standalone_logging
-from prompts import build_instructions, greeting_instruction
+from prompts import build_instructions, greeting_text
 from session_state import CallUserdata
 from simulations.assertions import on_simulation_end
 from startup import run_startup_checks
@@ -37,7 +38,8 @@ from tools.appointment_tools import (
     send_confirmation_sms,
     transfer_to_human,
 )
-from tools.phone import get_sip_caller_phone
+from tools.phone import get_mock_caller_phone, get_sip_caller_phone
+from tools.speech_format import spoken_times_transform
 
 
 def _evaluate_guardrails(user_text: str, userdata: CallUserdata) -> str | None:
@@ -69,7 +71,7 @@ class ClinicReceptionistAgent(Agent):
         super().__init__(instructions=build_instructions(now_in_clinic(), caller_phone))
 
     async def on_enter(self) -> None:
-        await self.session.generate_reply(instructions=greeting_instruction())
+        self.session.say(greeting_text())
 
     async def on_user_turn_completed(self, turn_ctx: llm.ChatContext, new_message: llm.ChatMessage) -> None:
         reply = _evaluate_guardrails(new_message.text_content or "", self.session.userdata)
@@ -130,22 +132,38 @@ async def _resolve_room_sid(room: rtc.Room) -> str:
         return ""
 
 
+def _end_call_tool() -> EndCallTool:
+    return EndCallTool(
+        extra_description=(
+            "Call this only after the caller confirms they need nothing else, or says goodbye. "
+            "Never call it while a booking, confirmation text, or transfer is still in progress."
+        ),
+        delete_room=True,
+        end_instructions="Say one short, warm goodbye sentence and nothing else.",
+        ignore_on_enter=True,
+    )
+
+
 def _build_session(ctx: JobContext, trace_id: str, caller_phone: str | None) -> AgentSession[CallUserdata]:
     credentials = {
         "api_key": settings.LIVEKIT_API_KEY or None,
         "api_secret": settings.LIVEKIT_API_SECRET or None,
     }
-    tts_text_transforms: list = ["filter_markdown", "filter_emoji"]
+    tts_text_transforms: list = ["filter_markdown", "filter_emoji", spoken_times_transform]
     if settings.GUARDRAILS_ENABLED and settings.GUARDRAILS_TTS_SANITIZER_ENABLED:
         tts_text_transforms.append(mask_secrets_transform)
 
     return AgentSession(
         vad=ctx.proc.userdata["vad"],
         stt=inference.STT(f"{settings.STT_PROVIDER}/{settings.STT_MODEL}", **credentials),
-        llm=inference.LLM(f"{settings.LLM_PROVIDER}/{settings.LLM_MODEL}", **credentials),
+        llm=inference.LLM(
+            f"{settings.LLM_PROVIDER}/{settings.LLM_MODEL}",
+            inference_class=settings.LLM_INFERENCE_CLASS or None,
+            **credentials,
+        ),
         tts=inference.TTS(f"{settings.TTS_PROVIDER}/{settings.TTS_MODEL}", voice=settings.TTS_VOICE_ID, **credentials),
         tts_text_transforms=tts_text_transforms,
-        tools=[check_availability, book_appointment, send_confirmation_sms, transfer_to_human],
+        tools=[check_availability, book_appointment, send_confirmation_sms, transfer_to_human, *_end_call_tool().tools],
         userdata=CallUserdata(trace_id=trace_id, caller_phone=caller_phone, job_ctx=ctx),
     )
 
@@ -183,6 +201,10 @@ async def entrypoint(ctx: JobContext) -> None:
         logger.debug("Participant attributes updated: changed=%s, all=%s", changed_attributes, remote_p.attributes)
 
     caller_phone = get_sip_caller_phone(ctx.room, participant)
+    if caller_phone is None:
+        caller_phone = get_mock_caller_phone()
+        if caller_phone:
+            logger.info("Using mock caller phone from config: %s", caller_phone)
     if sim and "caller_phone" in sim.userdata():
         caller_phone = sim.userdata()["caller_phone"]
     logger.info("Caller phone: %s", caller_phone or "not provided by caller ID")

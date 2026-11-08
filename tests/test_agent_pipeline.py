@@ -7,6 +7,7 @@ from agent import ClinicReceptionistAgent, _guarded_text_input_cb, _prewarm, ent
 from guardrails.emergency import EMERGENCY_RESPONSE_TEXT
 from session_state import BookingRecord, CallUserdata, TransferRecord
 from simulations.assertions import on_simulation_end
+from tools.speech_format import spoken_times_transform
 
 
 def test_clinic_agent_instructions_constraints():
@@ -25,6 +26,9 @@ def test_clinic_agent_instructions_constraints():
     assert "confirm the appointment date and time before booking" in instructions
     assert "proactive notifications and waitlists are unavailable" in instructions
     assert "closest slot" in instructions
+    assert "never as digits like '11:00 AM'" in instructions
+    assert "call end_call to hang up" in instructions
+    assert "2:30" not in instructions
 
 
 def test_clinic_agent_instructions_with_caller_phone():
@@ -39,13 +43,22 @@ def test_clinic_agent_instructions_with_caller_phone():
 async def test_clinic_agent_on_enter_greeting():
     agent = ClinicReceptionistAgent()
     mock_session = MagicMock()
-    mock_session.generate_reply = AsyncMock()
     agent._activity = MagicMock(session=mock_session)
 
     await agent.on_enter()
-    mock_session.generate_reply.assert_awaited_once()
-    call_kwargs = mock_session.generate_reply.call_args.kwargs
-    assert "How can I help you?" in call_kwargs["instructions"]
+    mock_session.say.assert_called_once()
+    assert "How can I help you?" in mock_session.say.call_args.args[0]
+    mock_session.generate_reply.assert_not_called()
+
+
+def test_instructions_static_prefix_is_identical_across_calls():
+    import datetime
+    from prompts import CALL_CONTEXT_MARKER, build_instructions
+
+    a = build_instructions(datetime.datetime(2026, 1, 5, 9, 0), None)
+    b = build_instructions(datetime.datetime(2026, 7, 9, 15, 45), "+18453768795")
+    assert a.index(CALL_CONTEXT_MARKER) == b.index(CALL_CONTEXT_MARKER)
+    assert a.split(CALL_CONTEXT_MARKER)[0] == b.split(CALL_CONTEXT_MARKER)[0]
 
 
 def test_prewarm_loads_vad_once_per_process():
@@ -85,7 +98,7 @@ async def test_entrypoint_orchestration():
     mock_session.start = AsyncMock()
 
     with patch("agent.telemetry.create_session_trace") as mock_trace, \
-         patch("agent.AgentSession", return_value=mock_session), \
+         patch("agent.AgentSession", return_value=mock_session) as agent_session_cls, \
          patch("agent.silero.VAD.load", return_value=MagicMock()), \
          patch("agent.inference.STT", return_value=MagicMock()), \
          patch("agent.inference.TTS", return_value=MagicMock()), \
@@ -93,6 +106,9 @@ async def test_entrypoint_orchestration():
 
         await entrypoint(mock_ctx)
 
+        session_kwargs = agent_session_cls.call_args.kwargs
+        assert "end_call" in [t.info.name for t in session_kwargs["tools"]]
+        assert spoken_times_transform in session_kwargs["tts_text_transforms"]
         mock_ctx.connect.assert_awaited_once()
         mock_trace.assert_called_once_with(
             trace_id="room_test_12345",
