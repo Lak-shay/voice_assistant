@@ -1,8 +1,10 @@
 import os
 import tempfile
 from pathlib import Path
+from typing import Literal
 
 from dotenv import load_dotenv
+from pydantic import field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -50,7 +52,7 @@ class Settings(BaseSettings):
     STT_MODEL: str
     LLM_PROVIDER: str
     LLM_MODEL: str
-    LLM_INFERENCE_CLASS: str = ""
+    LLM_INFERENCE_CLASS: Literal["priority", "standard", "low"] | None = None
     TTS_PROVIDER: str
     TTS_MODEL: str
     TTS_VOICE_ID: str
@@ -94,6 +96,13 @@ class Settings(BaseSettings):
     GUARDRAILS_INJECTION_DEFENSE_ENABLED: bool = True
     GUARDRAILS_MEDICAL_ADVICE_ENABLED: bool = True
     GUARDRAILS_TTS_SANITIZER_ENABLED: bool = True
+
+    @field_validator("LLM_INFERENCE_CLASS", mode="before")
+    @classmethod
+    def _blank_inference_class_is_default(cls, value: object) -> object:
+        if isinstance(value, str):
+            return value.strip().lower() or None
+        return value
 
     model_config = SettingsConfigDict(
         env_file=ACTIVE_ENV_FILE,

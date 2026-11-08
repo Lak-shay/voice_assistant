@@ -1,10 +1,12 @@
 import asyncio
+import re
 from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 from livekit.agents.llm import StopResponse
 
 from agent import ClinicReceptionistAgent, _guarded_text_input_cb, _prewarm, entrypoint
 from guardrails.emergency import EMERGENCY_RESPONSE_TEXT
+from prompts import CALL_CONTEXT_MARKER
 from session_state import BookingRecord, CallUserdata, TransferRecord
 from simulations.assertions import on_simulation_end
 from tools.speech_format import spoken_times_transform
@@ -28,7 +30,8 @@ def test_clinic_agent_instructions_constraints():
     assert "closest slot" in instructions
     assert "never as digits like '11:00 AM'" in instructions
     assert "call end_call to hang up" in instructions
-    assert "2:30" not in instructions
+    static_rules = instructions.split(CALL_CONTEXT_MARKER)[0]
+    assert re.findall(r"\d{1,2}:\d{2}", static_rules) == ["11:00"]
 
 
 def test_clinic_agent_instructions_with_caller_phone():

@@ -158,7 +158,7 @@ def _build_session(ctx: JobContext, trace_id: str, caller_phone: str | None) -> 
         stt=inference.STT(f"{settings.STT_PROVIDER}/{settings.STT_MODEL}", **credentials),
         llm=inference.LLM(
             f"{settings.LLM_PROVIDER}/{settings.LLM_MODEL}",
-            inference_class=settings.LLM_INFERENCE_CLASS or None,
+            inference_class=settings.LLM_INFERENCE_CLASS,
             **credentials,
         ),
         tts=inference.TTS(f"{settings.TTS_PROVIDER}/{settings.TTS_MODEL}", voice=settings.TTS_VOICE_ID, **credentials),
