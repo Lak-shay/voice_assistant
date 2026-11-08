@@ -29,3 +29,4 @@ class CallUserdata:
     last_booking: BookingRecord | None = None
     last_transfer: TransferRecord | None = None
     last_guardrail: str | None = None
+    agent_ended_call: bool = False

@@ -123,5 +123,20 @@ class TelemetryManager:
         except Exception as exc:
             logger.warning("Failed to record guardrail score: %s", exc)
 
+    def record_call_end(self, trace_id: str, end_reason: str, livekit_reason: str) -> None:
+        client = self.get_client()
+        if not client:
+            return
+        try:
+            client.create_score(
+                name="call_end_reason",
+                value=end_reason,
+                data_type="CATEGORICAL",
+                trace_id=_langfuse_trace_id(trace_id),
+                comment=f"livekit_close_reason={livekit_reason}",
+            )
+        except Exception as exc:
+            logger.warning("Failed to record call end reason: %s", exc)
+
 
 telemetry = TelemetryManager()

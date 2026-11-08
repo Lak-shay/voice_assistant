@@ -18,6 +18,7 @@ from livekit.agents import (
 )
 from livekit.agents.beta.tools import EndCallTool
 from livekit.agents.llm import StopResponse
+from livekit.agents.voice.events import CloseEvent, FunctionToolsExecutedEvent
 from livekit.agents.worker import JobExecutorType
 from livekit.plugins import silero
 from opentelemetry import trace as trace_api
@@ -213,6 +214,18 @@ async def entrypoint(ctx: JobContext) -> None:
     root_span = telemetry.otel_parent_span(trace_id)
     # Session tasks copy the current OTel context when they are created, so starting the session
     # while the root is current makes every turn, LLM, TTS and tool span a child of inbound_call.
+    # LiveKit reports end_call as "user_initiated" (any session.shutdown()), so track the cause here.
+    @session.on("function_tools_executed")
+    def on_tools_executed(ev: FunctionToolsExecutedEvent) -> None:
+        if any(call.name == "end_call" for call in ev.function_calls):
+            session.userdata.agent_ended_call = True
+
+    @session.on("close")
+    def on_session_close(ev: CloseEvent) -> None:
+        end_reason = "agent_end_call" if session.userdata.agent_ended_call else ev.reason.value
+        logger.info("Call ended: end_reason=%s livekit_reason=%s", end_reason, ev.reason.value)
+        telemetry.record_call_end(trace_id, end_reason, ev.reason.value)
+
     with trace_api.use_span(root_span, end_on_exit=False) if root_span else contextlib.nullcontext():
         await session.start(
             agent=ClinicReceptionistAgent(caller_phone=caller_phone),
