@@ -4,7 +4,7 @@ from typing import Annotated
 
 from dateutil import parser
 from livekit import rtc
-from livekit.agents import JobContext, RunContext, SimulationContext, function_tool
+from livekit.agents import RunContext, function_tool
 from pydantic import Field
 
 from clinic_time import parse_flexible_date
@@ -103,9 +103,8 @@ async def check_availability(
         if not target_date:
             return "I did not catch that date. Which day would you like to come in?"
 
-        is_valid_date, date_err = validate_booking_date_range(target_date)
-        if not is_valid_date:
-            return date_err or "Please provide a valid date."
+        if date_err := validate_booking_date_range(target_date):
+            return date_err
 
         date_str = target_date.isoformat()
         spoken_date = format_weekday_date(target_date)
@@ -162,17 +161,15 @@ async def book_appointment(
     context.disallow_interruptions()
 
     try:
-        valid_name, name_err = validate_patient_name(patient_name)
-        if not valid_name:
-            return name_err or "A full patient name is required to complete the booking."
+        if name_err := validate_patient_name(patient_name):
+            return name_err
 
-        valid_phone, clean_phone, phone_err = validate_patient_phone(patient_phone)
-        if not valid_phone or not clean_phone:
-            return phone_err or "A valid phone number is required to complete the booking."
+        clean_phone, phone_err = validate_patient_phone(patient_phone)
+        if clean_phone is None:
+            return phone_err
 
-        is_valid_date, date_err = validate_booking_date_range(slot_time)
-        if not is_valid_date:
-            return date_err or "Please choose an upcoming appointment date."
+        if date_err := validate_booking_date_range(slot_time):
+            return date_err
 
         clean_name = patient_name.strip()
         res = await calendar_service.book_slot(slot_time, clean_name, clean_phone)
@@ -219,10 +216,6 @@ def _find_caller(room: rtc.Room) -> rtc.RemoteParticipant | None:
     return sip or (participants[0] if participants else None)
 
 
-def _is_simulation(job_ctx: JobContext) -> bool:
-    return isinstance(job_ctx.simulation_context(), SimulationContext)
-
-
 @function_tool()
 async def transfer_to_human(
     context: RunContext[CallUserdata],
@@ -243,7 +236,7 @@ async def transfer_to_human(
 
     job_ctx = context.userdata.job_ctx
     # Simulated calls have no SIP leg to transfer, so the intent is recorded for the simulation assertions.
-    if job_ctx is None or _is_simulation(job_ctx):
+    if job_ctx is None or job_ctx.simulation_context() is not None:
         logger.info("Simulated transfer to front desk %s (reason: %s)", failover_phone, reason)
         record(True)
         return TRANSFERRING_REPLY

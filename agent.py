@@ -9,6 +9,7 @@ from livekit.agents import (
     Agent,
     AgentServer,
     AgentSession,
+    TurnHandlingOptions,
     JobContext,
     JobProcess,
     cli,
@@ -16,7 +17,10 @@ from livekit.agents import (
     llm,
     room_io,
 )
+from livekit.agents.beta.tools import EndCallTool
 from livekit.agents.llm import StopResponse
+from livekit.agents.metrics import LLMMetrics
+from livekit.agents.voice.events import CloseEvent, FunctionToolsExecutedEvent
 from livekit.agents.worker import JobExecutorType
 from livekit.plugins import silero
 from opentelemetry import trace as trace_api
@@ -26,7 +30,7 @@ from config import settings
 from guardrails.input_guardrails import check_input_guardrails
 from guardrails.output_guardrails import mask_secrets_transform
 from logger import bind_call_context, logger, standalone_logging
-from prompts import build_instructions, greeting_instruction
+from prompts import build_instructions, greeting_text
 from session_state import CallUserdata
 from simulations.assertions import on_simulation_end
 from startup import run_startup_checks
@@ -37,7 +41,8 @@ from tools.appointment_tools import (
     send_confirmation_sms,
     transfer_to_human,
 )
-from tools.phone import get_sip_caller_phone
+from tools.phone import get_mock_caller_phone, get_sip_caller_phone
+from tools.speech_format import spoken_times_transform
 
 
 def _evaluate_guardrails(user_text: str, userdata: CallUserdata) -> str | None:
@@ -69,7 +74,7 @@ class ClinicReceptionistAgent(Agent):
         super().__init__(instructions=build_instructions(now_in_clinic(), caller_phone))
 
     async def on_enter(self) -> None:
-        await self.session.generate_reply(instructions=greeting_instruction())
+        self.session.say(greeting_text())
 
     async def on_user_turn_completed(self, turn_ctx: llm.ChatContext, new_message: llm.ChatMessage) -> None:
         reply = _evaluate_guardrails(new_message.text_content or "", self.session.userdata)
@@ -130,22 +135,69 @@ async def _resolve_room_sid(room: rtc.Room) -> str:
         return ""
 
 
+def _end_call_tool() -> EndCallTool:
+    return EndCallTool(
+        extra_description=(
+            "Call this only after the caller confirms they need nothing else, or says goodbye. "
+            "Never call it while a booking, confirmation text, or transfer is still in progress."
+        ),
+        delete_room=True,
+        end_instructions="Say one short, warm goodbye sentence and nothing else.",
+        ignore_on_enter=True,
+    )
+
+
+def _log_llm_metrics(m: LLMMetrics) -> None:
+    logger.info(
+        "LLM request: prompt_tokens=%d cached=%d completion_tokens=%d ttft=%.2fs cancelled=%s",
+        m.prompt_tokens, m.prompt_cached_tokens, m.completion_tokens, m.ttft, m.cancelled,
+    )
+
+
 def _build_session(ctx: JobContext, trace_id: str, caller_phone: str | None) -> AgentSession[CallUserdata]:
     credentials = {
         "api_key": settings.LIVEKIT_API_KEY or None,
         "api_secret": settings.LIVEKIT_API_SECRET or None,
     }
-    tts_text_transforms: list = ["filter_markdown", "filter_emoji"]
+    tts_text_transforms: list = ["filter_markdown", "filter_emoji", spoken_times_transform]
     if settings.GUARDRAILS_ENABLED and settings.GUARDRAILS_TTS_SANITIZER_ENABLED:
         tts_text_transforms.append(mask_secrets_transform)
 
+    session_llm = inference.LLM(
+        f"{settings.LLM_PROVIDER}/{settings.LLM_MODEL}",
+        inference_class=settings.LLM_INFERENCE_CLASS,
+        **credentials,
+    )
+    # The session-level metrics_collected event is deprecated; the per-plugin one is not.
+    session_llm.on("metrics_collected", _log_llm_metrics)
+
     return AgentSession(
         vad=ctx.proc.userdata["vad"],
-        stt=inference.STT(f"{settings.STT_PROVIDER}/{settings.STT_MODEL}", **credentials),
-        llm=inference.LLM(f"{settings.LLM_PROVIDER}/{settings.LLM_MODEL}", **credentials),
+        stt=inference.STT(
+            f"{settings.STT_PROVIDER}/{settings.STT_MODEL}",
+            language=settings.STT_LANGUAGE,
+            **credentials,
+        ),
+        llm=session_llm,
         tts=inference.TTS(f"{settings.TTS_PROVIDER}/{settings.TTS_MODEL}", voice=settings.TTS_VOICE_ID, **credentials),
+        stt_context_options={
+            "keyterms": settings.stt_keyterms,
+            "keyterm_detection": {"enabled": settings.STT_KEYTERM_DETECTION_ENABLED},
+        },
+        turn_handling=TurnHandlingOptions(
+            endpointing={
+                "mode": settings.ENDPOINTING_MODE,
+                "min_delay": settings.ENDPOINTING_MIN_DELAY,
+                "max_delay": settings.ENDPOINTING_MAX_DELAY,
+            },
+            preemptive_generation={
+                "enabled": settings.PREEMPTIVE_GENERATION_ENABLED,
+                "preemptive_tts": settings.PREEMPTIVE_TTS_ENABLED,
+                "max_retries": settings.PREEMPTIVE_MAX_RETRIES,
+            },
+        ),
         tts_text_transforms=tts_text_transforms,
-        tools=[check_availability, book_appointment, send_confirmation_sms, transfer_to_human],
+        tools=[check_availability, book_appointment, send_confirmation_sms, transfer_to_human, *_end_call_tool().tools],
         userdata=CallUserdata(trace_id=trace_id, caller_phone=caller_phone, job_ctx=ctx),
     )
 
@@ -183,12 +235,29 @@ async def entrypoint(ctx: JobContext) -> None:
         logger.debug("Participant attributes updated: changed=%s, all=%s", changed_attributes, remote_p.attributes)
 
     caller_phone = get_sip_caller_phone(ctx.room, participant)
+    if caller_phone is None:
+        caller_phone = get_mock_caller_phone()
+        if caller_phone:
+            logger.info("Using mock caller phone from config: %s", caller_phone)
     if sim and "caller_phone" in sim.userdata():
         caller_phone = sim.userdata()["caller_phone"]
     logger.info("Caller phone: %s", caller_phone or "not provided by caller ID")
 
     session = _build_session(ctx, trace_id, caller_phone)
     root_span = telemetry.otel_parent_span(trace_id)
+
+    # LiveKit reports end_call as "user_initiated" (any session.shutdown()), so track the cause here.
+    @session.on("function_tools_executed")
+    def on_tools_executed(ev: FunctionToolsExecutedEvent) -> None:
+        if any(call.name == "end_call" for call in ev.function_calls):
+            session.userdata.agent_ended_call = True
+
+    @session.on("close")
+    def on_session_close(ev: CloseEvent) -> None:
+        end_reason = "agent_end_call" if session.userdata.agent_ended_call else ev.reason.value
+        logger.info("Call ended: end_reason=%s livekit_reason=%s", end_reason, ev.reason.value)
+        telemetry.record_call_end(trace_id, end_reason, ev.reason.value)
+
     # Session tasks copy the current OTel context when they are created, so starting the session
     # while the root is current makes every turn, LLM, TTS and tool span a child of inbound_call.
     with trace_api.use_span(root_span, end_on_exit=False) if root_span else contextlib.nullcontext():
@@ -196,7 +265,6 @@ async def entrypoint(ctx: JobContext) -> None:
             agent=ClinicReceptionistAgent(caller_phone=caller_phone),
             room=ctx.room,
             room_options=room_io.RoomOptions(
-                audio_input=room_io.AudioInputOptions(),
                 text_input=room_io.TextInputOptions(text_input_cb=_guarded_text_input_cb),
             ),
         )

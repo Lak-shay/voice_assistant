@@ -1,12 +1,17 @@
 import asyncio
+import re
 from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
+
+from config import settings
 from livekit.agents.llm import StopResponse
 
-from agent import ClinicReceptionistAgent, _guarded_text_input_cb, _prewarm, entrypoint
+from agent import ClinicReceptionistAgent, _guarded_text_input_cb, _log_llm_metrics, _prewarm, entrypoint
 from guardrails.emergency import EMERGENCY_RESPONSE_TEXT
+from prompts import CALL_CONTEXT_MARKER
 from session_state import BookingRecord, CallUserdata, TransferRecord
 from simulations.assertions import on_simulation_end
+from tools.speech_format import spoken_times_transform
 
 
 def test_clinic_agent_instructions_constraints():
@@ -25,6 +30,10 @@ def test_clinic_agent_instructions_constraints():
     assert "confirm the appointment date and time before booking" in instructions
     assert "proactive notifications and waitlists are unavailable" in instructions
     assert "closest slot" in instructions
+    assert "never as digits like '11:00 AM'" in instructions
+    assert "call end_call to hang up" in instructions
+    static_rules = instructions.split(CALL_CONTEXT_MARKER)[0]
+    assert re.findall(r"\d{1,2}:\d{2}", static_rules) == ["11:00"]
 
 
 def test_clinic_agent_instructions_with_caller_phone():
@@ -39,13 +48,22 @@ def test_clinic_agent_instructions_with_caller_phone():
 async def test_clinic_agent_on_enter_greeting():
     agent = ClinicReceptionistAgent()
     mock_session = MagicMock()
-    mock_session.generate_reply = AsyncMock()
     agent._activity = MagicMock(session=mock_session)
 
     await agent.on_enter()
-    mock_session.generate_reply.assert_awaited_once()
-    call_kwargs = mock_session.generate_reply.call_args.kwargs
-    assert "How can I help you?" in call_kwargs["instructions"]
+    mock_session.say.assert_called_once()
+    assert "How can I help you?" in mock_session.say.call_args.args[0]
+    mock_session.generate_reply.assert_not_called()
+
+
+def test_instructions_static_prefix_is_identical_across_calls():
+    import datetime
+    from prompts import CALL_CONTEXT_MARKER, build_instructions
+
+    a = build_instructions(datetime.datetime(2026, 1, 5, 9, 0), None)
+    b = build_instructions(datetime.datetime(2026, 7, 9, 15, 45), "+18453768795")
+    assert a.index(CALL_CONTEXT_MARKER) == b.index(CALL_CONTEXT_MARKER)
+    assert a.split(CALL_CONTEXT_MARKER)[0] == b.split(CALL_CONTEXT_MARKER)[0]
 
 
 def test_prewarm_loads_vad_once_per_process():
@@ -85,7 +103,7 @@ async def test_entrypoint_orchestration():
     mock_session.start = AsyncMock()
 
     with patch("agent.telemetry.create_session_trace") as mock_trace, \
-         patch("agent.AgentSession", return_value=mock_session), \
+         patch("agent.AgentSession", return_value=mock_session) as agent_session_cls, \
          patch("agent.silero.VAD.load", return_value=MagicMock()), \
          patch("agent.inference.STT", return_value=MagicMock()), \
          patch("agent.inference.TTS", return_value=MagicMock()), \
@@ -93,6 +111,22 @@ async def test_entrypoint_orchestration():
 
         await entrypoint(mock_ctx)
 
+        session_kwargs = agent_session_cls.call_args.kwargs
+        assert "end_call" in [t.info.name for t in session_kwargs["tools"]]
+        assert spoken_times_transform in session_kwargs["tts_text_transforms"]
+        assert session_kwargs["stt_context_options"]["keyterms"] == settings.stt_keyterms
+        assert session_kwargs["stt_context_options"]["keyterm_detection"] == {
+            "enabled": settings.STT_KEYTERM_DETECTION_ENABLED
+        }
+        turn = session_kwargs["turn_handling"]
+        assert turn["endpointing"]["min_delay"] == settings.ENDPOINTING_MIN_DELAY
+        assert turn["endpointing"]["max_delay"] == settings.ENDPOINTING_MAX_DELAY
+        assert turn["preemptive_generation"]["enabled"] == settings.PREEMPTIVE_GENERATION_ENABLED
+        assert turn["preemptive_generation"]["preemptive_tts"] == settings.PREEMPTIVE_TTS_ENABLED
+        session_kwargs["llm"].on.assert_called_once_with("metrics_collected", _log_llm_metrics)
+        mock_session.on.assert_any_call("close")
+        assert all(c.args[0] != "metrics_collected" for c in mock_session.on.call_args_list)
+        assert turn["preemptive_generation"]["max_retries"] == settings.PREEMPTIVE_MAX_RETRIES
         mock_ctx.connect.assert_awaited_once()
         mock_trace.assert_called_once_with(
             trace_id="room_test_12345",

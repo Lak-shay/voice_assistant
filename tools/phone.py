@@ -62,3 +62,16 @@ def get_sip_caller_phone(room: rtc.Room | None = None, participant: rtc.Particip
             logger.info("Resolved caller phone number: raw=%s, sanitized=%s", cand, sanitized)
             return sanitized
     return None
+
+
+def get_mock_caller_phone() -> str | None:
+    """Configured mock caller number when the flag is on, APP_ENV is dev, and the number is valid, else None."""
+    if not settings.MOCK_CALLER_PHONE_ENABLED:
+        return None
+    if settings.APP_ENV.strip().lower() not in ("dev", "development"):
+        logger.warning("MOCK_CALLER_PHONE_ENABLED is ignored because APP_ENV is %s", settings.APP_ENV)
+        return None
+    mock = sanitize_e164(settings.MOCK_CALLER_PHONE)
+    if not mock:
+        logger.warning("MOCK_CALLER_PHONE_ENABLED is on but MOCK_CALLER_PHONE is not a valid phone number")
+    return mock

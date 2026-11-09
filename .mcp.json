@@ -1,0 +1,19 @@
+{
+	"mcpServers": {
+		"livekit-docs": {
+			"url": "https://docs.livekit.io/mcp",
+			"type": "http"
+		},
+		"langfuse-docs": {
+            "command": "npx",
+            "args": [
+                "mcp-remote",
+                "https://langfuse.com/api/mcp"
+            ]
+        },
+		"Telnyx": {
+			"url": "https://developers.telnyx.com/mcp",
+			"type": "http"
+		}
+	}
+}

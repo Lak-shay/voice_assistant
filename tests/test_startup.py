@@ -256,3 +256,17 @@ async def test_run_startup_checks_calendar_failure(mock_settings):
         result = await run_startup_checks(mock_settings)
         assert result is False
 
+
+@pytest.mark.parametrize("raw, expected", [("", None), ("  ", None), ("Priority", "priority"), ("low", "low")])
+def test_llm_inference_class_normalizes_blank_and_case(raw, expected):
+    from config import settings
+
+    assert Settings(**{**settings.model_dump(), "LLM_INFERENCE_CLASS": raw}).LLM_INFERENCE_CLASS == expected
+
+
+def test_llm_inference_class_rejects_unknown_value():
+    from pydantic import ValidationError
+    from config import settings
+
+    with pytest.raises(ValidationError):
+        Settings(**{**settings.model_dump(), "LLM_INFERENCE_CLASS": "fastest"})
