@@ -9,6 +9,7 @@ from livekit.agents import (
     Agent,
     AgentServer,
     AgentSession,
+    TurnHandlingOptions,
     JobContext,
     JobProcess,
     cli,
@@ -18,7 +19,8 @@ from livekit.agents import (
 )
 from livekit.agents.beta.tools import EndCallTool
 from livekit.agents.llm import StopResponse
-from livekit.agents.voice.events import CloseEvent, FunctionToolsExecutedEvent
+from livekit.agents.metrics import LLMMetrics
+from livekit.agents.voice.events import CloseEvent, FunctionToolsExecutedEvent, MetricsCollectedEvent
 from livekit.agents.worker import JobExecutorType
 from livekit.plugins import silero
 from opentelemetry import trace as trace_api
@@ -167,6 +169,22 @@ def _build_session(ctx: JobContext, trace_id: str, caller_phone: str | None) -> 
             **credentials,
         ),
         tts=inference.TTS(f"{settings.TTS_PROVIDER}/{settings.TTS_MODEL}", voice=settings.TTS_VOICE_ID, **credentials),
+        stt_context_options={
+            "keyterms": settings.stt_keyterms,
+            "keyterm_detection": {"enabled": settings.STT_KEYTERM_DETECTION_ENABLED},
+        },
+        turn_handling=TurnHandlingOptions(
+            endpointing={
+                "mode": settings.ENDPOINTING_MODE,
+                "min_delay": settings.ENDPOINTING_MIN_DELAY,
+                "max_delay": settings.ENDPOINTING_MAX_DELAY,
+            },
+            preemptive_generation={
+                "enabled": True,
+                "preemptive_tts": settings.PREEMPTIVE_TTS_ENABLED,
+                "max_retries": settings.PREEMPTIVE_MAX_RETRIES,
+            },
+        ),
         tts_text_transforms=tts_text_transforms,
         tools=[check_availability, book_appointment, send_confirmation_sms, transfer_to_human, *_end_call_tool().tools],
         userdata=CallUserdata(trace_id=trace_id, caller_phone=caller_phone, job_ctx=ctx),
@@ -222,6 +240,15 @@ async def entrypoint(ctx: JobContext) -> None:
     def on_tools_executed(ev: FunctionToolsExecutedEvent) -> None:
         if any(call.name == "end_call" for call in ev.function_calls):
             session.userdata.agent_ended_call = True
+
+    @session.on("metrics_collected")
+    def on_metrics(ev: MetricsCollectedEvent) -> None:
+        if isinstance(ev.metrics, LLMMetrics):
+            m = ev.metrics
+            logger.info(
+                "LLM request: prompt_tokens=%d cached=%d completion_tokens=%d ttft=%.2fs cancelled=%s",
+                m.prompt_tokens, m.prompt_cached_tokens, m.completion_tokens, m.ttft, m.cancelled,
+            )
 
     @session.on("close")
     def on_session_close(ev: CloseEvent) -> None:

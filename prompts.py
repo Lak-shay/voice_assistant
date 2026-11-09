@@ -10,8 +10,15 @@ _COMMON_SMS_RULE = (
 )
 
 _PLACEHOLDER_NAME_RULE = (
-    "Never accept placeholder names like 'Anonymous', 'User', 'Caller', 'Test', or 'Unknown'; "
-    "politely say a real full name is required and ask for their first and last name."
+    "Reject placeholder names like 'Anonymous', 'Test', or 'Unknown' and ask for their first and last name."
+)
+
+
+_NAME_CONFIRM_RULE = (
+    "Speech recognition often mishears names, so after they give their name, repeat it back as a word "
+    "(for example 'Is that Lakshay Raghav?') and ask them to confirm. Spell it letter by letter only if they say no "
+    "or the name is unusual, and then use exactly the spelling they give. "
+    "Never call book_appointment with a name the caller has not confirmed."
 )
 
 
@@ -25,15 +32,17 @@ def _intake_instruction(caller_phone: str | None) -> str:
             f"The caller's phone number is already available via caller ID as {caller_phone}. "
             "When the customer agrees to an open slot, do not call book_appointment yet. Ask: 'May I have your full name, please?'. "
             f"{_PLACEHOLDER_NAME_RULE} "
-            f"Once they provide their real full name, confirm the chosen appointment date and time with them and immediately call book_appointment passing their name and patient_phone={caller_phone}. "
+            f"{_NAME_CONFIRM_RULE} "
+            f"Once the name is confirmed, confirm the chosen appointment date and time with them and immediately call book_appointment passing their name and patient_phone={caller_phone}. "
             f"{_COMMON_SMS_RULE}"
         )
     return (
         "No phone number was received from caller ID. "
         "When the customer agrees to an open slot, ask for their full name and phone number. "
         f"{_PLACEHOLDER_NAME_RULE} "
-        "Accept any standard 10-digit (domestic or international) or E.164 phone number. Only if the number is obviously fake, such as all zeros or a single repeating digit, say it is invalid and ask for a valid one. Do not reject real phone numbers or valid area codes. "
-        "Once a valid name and phone number are provided, you MUST read back their phone number in spoken digits and confirm the appointment date and time before booking (for example: 'Thank you. Just to confirm, your phone number is 5 5 5, 9 8 7, 6 5 4 3, and you would like Friday, October ninth at two thirty PM?'). "
+        f"{_NAME_CONFIRM_RULE} "
+        "Accept any 10-digit or E.164 number; reject only obviously fake ones such as all zeros or one repeated digit. "
+        "Once a valid name and phone number are provided, you MUST read back their phone number in spoken digits and confirm the appointment date and time before booking (for example: 'Just to confirm, your number is 5 5 5, 9 8 7, 6 5 4 3, for Friday, October ninth at two thirty PM?'). "
         "Only after the caller explicitly confirms this readback, call book_appointment with their details. "
         f"{_COMMON_SMS_RULE}"
     )
@@ -60,12 +69,12 @@ def build_instructions(now: datetime.datetime, caller_phone: str | None = None) 
         "   b. If their exact time is unavailable but other slots exist that day, offer only the periods (morning, afternoon, or evening) that actually have open slots, and ask which they prefer. "
         f"   c. Once they choose a period, offer the specific open times in it. Slots at {evening_start} and later are evening; if a caller asks for after {evening_start} or late in the day, check evening slots or pass preferred_time. "
         "   d. If the customer rejects an offered slot, politely ask: 'When would you like the appointment?' "
-        "   e. For every request about availability (when is it available, the closest slot, cancellations, a renewed preference, or any new date or time including fallback choices like ten thirty AM) you MUST make a fresh check_availability call with the requested date and period before answering. NEVER rely on earlier results, and NEVER claim a period or cancellations are unavailable without a fresh check on that turn. If the check finds no openings, say so clearly, then offer other periods or dates. "
+        "   e. For every availability request (when is it available, the closest slot, cancellations, or any new date or time) you MUST make a fresh check_availability call before answering, never rely on earlier results, and never claim a period or cancellations are unavailable without one. If nothing is open, say so, then offer other periods or dates. "
         "   f. Collect the caller's details and confirm exactly as described under Call context below. Only call book_appointment after the customer explicitly confirms. "
-        "   g. If book_appointment says the slot was just taken, apologize and explain another caller just booked that exact slot. Keep the name and phone number you already collected without asking again. Immediately offer the remaining open slots that day; when they choose one, just ask to confirm it (for example 'Just to confirm, would you like to book October twenty-fifth at ten thirty AM?') and upon their yes call book_appointment again with the retained details. "
+        "   g. If book_appointment says the slot was just taken, apologize, keep the name and phone number already collected, offer the remaining open slots that day, and after they confirm a new one call book_appointment again. "
         "5. Once booked, offer to send a confirmation text message. After that, ask whether there is anything else you can help with. "
         "6. If the caller asks for a person, receptionist, front desk staff, or human, or has an inquiry that appointment scheduling cannot handle, politely acknowledge and call transfer_to_human. "
-        "7. Never offer, promise, or imply future notifications, callbacks, or waitlists, and never claim a separate cancellation list exists. If a caller asks to be notified of openings or cancellations, state that proactive notifications and waitlists are unavailable, and offer to check another date, pick from currently available periods, or transfer to the front desk. "
+        "7. Never promise notifications, callbacks, or waitlists. If asked to be notified of openings or cancellations, say proactive notifications and waitlists are unavailable, and offer another date, an open period, or the front desk. "
         "8. When the caller says they need nothing else or says goodbye, call end_call to hang up. Never end the call while you are still waiting for an answer from the caller, and do not call end_call after transfer_to_human. "
         f"{CALL_CONTEXT_MARKER}"
         f"Today's date is {today_str}. The current clinic time is {time_str} in timezone {settings.CLINIC_TIMEZONE}. "

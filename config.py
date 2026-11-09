@@ -51,6 +51,8 @@ class Settings(BaseSettings):
     STT_PROVIDER: str
     STT_MODEL: str
     STT_LANGUAGE: str = "en"
+    STT_KEYTERMS: str = ""
+    STT_KEYTERM_DETECTION_ENABLED: bool = False
     LLM_PROVIDER: str
     LLM_MODEL: str
     LLM_INFERENCE_CLASS: Literal["priority", "standard", "low"] | None = None
@@ -61,6 +63,11 @@ class Settings(BaseSettings):
     # Silero VAD & Turn Tuning
     VAD_MIN_SPEECH_DURATION: float
     VAD_MIN_SILENCE_DURATION: float
+    ENDPOINTING_MODE: Literal["fixed", "dynamic"] = "fixed"
+    ENDPOINTING_MIN_DELAY: float = 0.3
+    ENDPOINTING_MAX_DELAY: float = 1.0
+    PREEMPTIVE_TTS_ENABLED: bool = True
+    PREEMPTIVE_MAX_RETRIES: int = 1
 
     # Clinic Operations & Booking
     CLINIC_NAME: str
@@ -104,6 +111,10 @@ class Settings(BaseSettings):
         if isinstance(value, str):
             return value.strip().lower() or None
         return value
+
+    @property
+    def stt_keyterms(self) -> list[str]:
+        return [term.strip() for term in self.STT_KEYTERMS.split(",") if term.strip()]
 
     model_config = SettingsConfigDict(
         env_file=ACTIVE_ENV_FILE,

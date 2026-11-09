@@ -2,6 +2,8 @@ import asyncio
 import re
 from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
+
+from config import settings
 from livekit.agents.llm import StopResponse
 
 from agent import ClinicReceptionistAgent, _guarded_text_input_cb, _prewarm, entrypoint
@@ -112,6 +114,15 @@ async def test_entrypoint_orchestration():
         session_kwargs = agent_session_cls.call_args.kwargs
         assert "end_call" in [t.info.name for t in session_kwargs["tools"]]
         assert spoken_times_transform in session_kwargs["tts_text_transforms"]
+        assert session_kwargs["stt_context_options"]["keyterms"] == settings.stt_keyterms
+        assert session_kwargs["stt_context_options"]["keyterm_detection"] == {
+            "enabled": settings.STT_KEYTERM_DETECTION_ENABLED
+        }
+        turn = session_kwargs["turn_handling"]
+        assert turn["endpointing"]["min_delay"] == settings.ENDPOINTING_MIN_DELAY
+        assert turn["endpointing"]["max_delay"] == settings.ENDPOINTING_MAX_DELAY
+        assert turn["preemptive_generation"]["preemptive_tts"] == settings.PREEMPTIVE_TTS_ENABLED
+        assert turn["preemptive_generation"]["max_retries"] == settings.PREEMPTIVE_MAX_RETRIES
         mock_ctx.connect.assert_awaited_once()
         mock_trace.assert_called_once_with(
             trace_id="room_test_12345",
