@@ -72,6 +72,26 @@ async def test_spoken_times_transform_handles_times_split_across_chunks():
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "parts, expected",
+    [
+        (["at 14:30", "  PM."], "at two thirty PM."),
+        (["at 14:30 PM ok"], "at two thirty PM ok"),
+        (["Open at ", "1:30 ", "a.m. ok"], "Open at one thirty AM. ok"),
+        (["00:15 works"], "twelve fifteen AM works"),
+        (["On September ", "1", "0th at 2:30 PM"], "On September tenth at two thirty PM"),
+        (["the 21st or 30th"], "the twenty first or thirtieth"),
+    ],
+)
+async def test_spoken_times_transform_keeps_meridiem_with_time(parts, expected):
+    async def chunks():
+        for part in parts:
+            yield part
+
+    assert "".join([c async for c in spoken_times_transform(chunks())]) == expected
+
+
+@pytest.mark.asyncio
 async def test_calendar_service_all_slots():
     cal = CalendarService()
     slots = await cal.get_all_slots_for_date(FUTURE_ISO)

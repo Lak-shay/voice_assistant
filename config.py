@@ -66,6 +66,7 @@ class Settings(BaseSettings):
     ENDPOINTING_MODE: Literal["fixed", "dynamic"] = "fixed"
     ENDPOINTING_MIN_DELAY: float = 0.3
     ENDPOINTING_MAX_DELAY: float = 1.0
+    PREEMPTIVE_GENERATION_ENABLED: bool = True
     PREEMPTIVE_TTS_ENABLED: bool = True
     PREEMPTIVE_MAX_RETRIES: int = 1
 

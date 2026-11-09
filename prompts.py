@@ -16,7 +16,7 @@ _PLACEHOLDER_NAME_RULE = (
 
 _NAME_CONFIRM_RULE = (
     "Speech recognition often mishears names, so after they give their name, repeat it back as a word "
-    "(for example 'Is that Lakshay Raghav?') and ask them to confirm. Spell it letter by letter only if they say no "
+    "(for example 'Is that Maria Lopez?') and ask them to confirm. Spell it letter by letter only if they say no "
     "or the name is unusual, and then use exactly the spelling they give. "
     "Never call book_appointment with a name the caller has not confirmed."
 )

@@ -6,7 +6,7 @@ import pytest
 from config import settings
 from livekit.agents.llm import StopResponse
 
-from agent import ClinicReceptionistAgent, _guarded_text_input_cb, _prewarm, entrypoint
+from agent import ClinicReceptionistAgent, _guarded_text_input_cb, _log_llm_metrics, _prewarm, entrypoint
 from guardrails.emergency import EMERGENCY_RESPONSE_TEXT
 from prompts import CALL_CONTEXT_MARKER
 from session_state import BookingRecord, CallUserdata, TransferRecord
@@ -121,7 +121,11 @@ async def test_entrypoint_orchestration():
         turn = session_kwargs["turn_handling"]
         assert turn["endpointing"]["min_delay"] == settings.ENDPOINTING_MIN_DELAY
         assert turn["endpointing"]["max_delay"] == settings.ENDPOINTING_MAX_DELAY
+        assert turn["preemptive_generation"]["enabled"] == settings.PREEMPTIVE_GENERATION_ENABLED
         assert turn["preemptive_generation"]["preemptive_tts"] == settings.PREEMPTIVE_TTS_ENABLED
+        session_kwargs["llm"].on.assert_called_once_with("metrics_collected", _log_llm_metrics)
+        mock_session.on.assert_any_call("close")
+        assert all(c.args[0] != "metrics_collected" for c in mock_session.on.call_args_list)
         assert turn["preemptive_generation"]["max_retries"] == settings.PREEMPTIVE_MAX_RETRIES
         mock_ctx.connect.assert_awaited_once()
         mock_trace.assert_called_once_with(
